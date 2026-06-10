@@ -1,16 +1,28 @@
-import { useState } from 'react'
-import { Home, Users, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { useState, useEffect } from 'react'
+import { Home, Users, Settings, ChevronLeft, ChevronRight, Loader2, UploadCloud } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Label } from '../ui/label'
+import { useTaskQueue } from '../../contexts/TaskQueueContext'
 
 interface MainLayoutProps {
   children: React.ReactNode
 }
 
 export function MainLayout({ children }: MainLayoutProps) {
-  const [isCollapsed, setIsCollapsed] = useState(false)
+  const [isCollapsed, setIsCollapsed] = useState(() => {
+    return localStorage.getItem('sidebar_collapsed') === 'true'
+  })
+
+  useEffect(() => {
+    localStorage.setItem('sidebar_collapsed', isCollapsed.toString())
+  }, [isCollapsed])
+
   const location = useLocation()
   const navigate = useNavigate()
+  const { tasks, isDrawerOpen, setIsDrawerOpen } = useTaskQueue()
+
+  const activeTasks = tasks.filter(t => t.status !== 'Complete' && t.status !== 'Failed' && t.status !== 'Warning').length
+
   const tabs = [
     { id: 'home', path: '/', label: 'Home', icon: Home },
     { id: 'cv-list', path: '/cv-list', label: 'Candidates', icon: Users },
@@ -44,6 +56,25 @@ export function MainLayout({ children }: MainLayoutProps) {
 
         <div className="flex-1" />
         
+        {/* Queue Progress Indicator */}
+        <button
+          onClick={() => setIsDrawerOpen(!isDrawerOpen)}
+          className={`flex items-center gap-3 py-2.5 rounded-lg transition-colors text-sm font-medium mb-2 ${isCollapsed ? 'justify-center px-0 w-12' : 'px-3 w-full'} ${activeTasks > 0 ? 'text-primary bg-primary/10 hover:bg-primary/20' : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground'}`}
+          title="Task Queue"
+        >
+          {activeTasks > 0 ? <Loader2 className="size-5 shrink-0 animate-spin" /> : <UploadCloud className="size-5 shrink-0" />}
+          {!isCollapsed && (
+            <div className="flex items-center justify-between flex-1">
+              <span>Queue</span>
+              {tasks.length > 0 && (
+                <span className="bg-background rounded-full px-2 py-0.5 text-xs font-bold border">
+                  {activeTasks > 0 ? activeTasks : tasks.length}
+                </span>
+              )}
+            </div>
+          )}
+        </button>
+
         <button
           onClick={() => setIsCollapsed(!isCollapsed)}
           className={`flex items-center gap-3 py-2.5 rounded-lg transition-colors text-sm font-medium text-muted-foreground hover:bg-accent hover:text-accent-foreground ${isCollapsed ? 'justify-center px-0 w-12' : 'px-3 w-full'}`}

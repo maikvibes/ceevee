@@ -9,33 +9,40 @@ import { toast } from 'sonner'
 
 import { Titlebar } from './components/ui/titlebar'
 
+import { TaskQueueProvider } from './contexts/TaskQueueContext'
+import { TaskQueueDrawer } from './components/layout/TaskQueueDrawer'
+
 function App() {
 
   useEffect(() => {
     const removeListener = window.api.onDocumentProgress((data: any) => {
       if (data.status === 'Failed') {
-        toast.error(`Processing Error: ${data.context || 'Unknown error occurred'}`)
+        const filename = data.context ? data.context.split(/[/\\]/).pop() : 'Document';
+        toast.error(`Processing failed for ${filename}: ${data.errorMessage || 'Unknown error occurred'}`);
       }
-    })
+    });
     return () => {
-      if (removeListener) removeListener()
-    }
-  }, [])
+      if (removeListener) removeListener();
+    };
+  }, []);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden">
       <Titlebar />
       <HashRouter>
-        <MainLayout>
-          <Routes>
-            <Route path="/" element={<HomeView />} />
-            <Route path="/cv-list" element={<CVListView />} />
-            <Route path="/settings" element={<SettingsView />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </MainLayout>
+        <TaskQueueProvider>
+          <MainLayout>
+            <Routes>
+              <Route path="/" element={<HomeView />} />
+              <Route path="/cv-list" element={<CVListView />} />
+              <Route path="/settings" element={<SettingsView />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </MainLayout>
+          <TaskQueueDrawer />
+        </TaskQueueProvider>
       </HashRouter>
-      <Toaster />
+      <Toaster position="top-right" />
     </div>
   )
 }

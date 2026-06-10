@@ -24,7 +24,13 @@ export class NotionSyncService {
   static async syncCandidate(candidateId: number, onProgress?: (status: string) => void) {
     try {
       if (onProgress) onProgress('Syncing to Notion')
-      const { notion, databaseId } = this.getClientAndDatabaseId()
+
+      let notion: Client, databaseId: string
+      try {
+        ({ notion, databaseId } = this.getClientAndDatabaseId())
+      } catch (err: any) {
+        throw new Error(`Notion configuration error: ${err.message}`)
+      }
 
       const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId) as any
       if (!candidate) throw new Error('Candidate not found')
@@ -88,17 +94,22 @@ export class NotionSyncService {
               }
             })
           }
-        } catch (uploadErr) {
+        } catch (uploadErr: any) {
           console.error('[NotionSyncService] Failed to upload CV file:', uploadErr)
-          // Continue creating page even if file upload fails
+          // Continue creating page even if file upload fails – but we'll note it
         }
       }
 
-      const response = await notion.pages.create({
-        parent: { database_id: databaseId },
-        properties,
-        ...(children.length > 0 && { children })
-      }) as any;
+      let response: any
+      try {
+        response = await notion.pages.create({
+          parent: { database_id: databaseId },
+          properties,
+          ...(children.length > 0 && { children })
+        }) as any;
+      } catch (pageErr: any) {
+        throw new Error(`Failed to create Notion page: ${pageErr.message}`)
+      }
 
       db.prepare(`
         INSERT INTO notion_sync_history (candidate_id, status, notion_page_url)
@@ -112,7 +123,7 @@ export class NotionSyncService {
         INSERT INTO notion_sync_history (candidate_id, status, error_message)
         VALUES (?, 'Failed', ?)
       `).run(candidateId, error.message)
-      return { success: false, error: error.message }
+      throw error
     }
   }
 }

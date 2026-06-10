@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import db from '../db'
 import { KeyStoreService } from '../services/KeyStoreService'
+import { documentQueue } from '../services/DocumentQueueService'
 
 class SettingsController {
   registerHandlers() {
@@ -44,6 +45,17 @@ class SettingsController {
     ipcMain.handle('unlock-keystore', async (_, password: string) => {
       try {
         await KeyStoreService.unlock(password)
+        
+        const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store LIMIT 1').get() as any
+        if (row) {
+          try {
+            KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
+          } catch (e) {
+            KeyStoreService.lock()
+            return { success: false, error: 'Incorrect Master Password' }
+          }
+        }
+
         return { success: true }
       } catch (error: any) {
         return { success: false, error: error.message }
@@ -63,6 +75,23 @@ class SettingsController {
       try {
         KeyStoreService.lock()
         db.prepare('DELETE FROM api_key_store').run()
+        return { success: true }
+      } catch (error: any) {
+        return { success: false, error: error.message }
+      }
+    })
+
+    ipcMain.handle('delete-all-data', async () => {
+      try {
+        documentQueue.clearQueue()
+        // Artificial delay for UX so the loading animation is visible to the user
+        await new Promise(resolve => setTimeout(resolve, 800))
+        
+        db.transaction(() => {
+          db.prepare('DELETE FROM notion_sync_history').run()
+          db.prepare('DELETE FROM document_tasks').run()
+          db.prepare('DELETE FROM candidates').run()
+        })()
         return { success: true }
       } catch (error: any) {
         return { success: false, error: error.message }

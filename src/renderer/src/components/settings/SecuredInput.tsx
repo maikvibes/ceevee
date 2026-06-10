@@ -3,6 +3,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react'
 import { MasterPasswordDialog } from './MasterPasswordDialog'
+import { toast } from 'sonner'
 
 interface SecuredInputProps {
   provider: string
@@ -28,6 +29,17 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
     onChange('') // Clear value on provider switch
     checkLockStatus()
   }, [provider])
+
+  useEffect(() => {
+    const handleReset = () => {
+      setIsLocked(true)
+      setIsLoaded(false)
+      onChange('')
+      setShowPassword(false)
+    }
+    window.addEventListener('keystore-reset', handleReset)
+    return () => window.removeEventListener('keystore-reset', handleReset)
+  }, [onChange])
 
   const checkLockStatus = async () => {
     const locked = await window.api.isKeystoreLocked()
@@ -68,7 +80,7 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
 
   const executeLock = async () => {
     if (!window.api.lockKeystore) {
-      alert("Please restart your app. The new lockKeystore backend handler is not loaded.")
+      toast.error("Please restart your app. The new lockKeystore backend handler is not loaded.")
       return
     }
     try {
@@ -79,10 +91,10 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
         onChange('')
         setShowPassword(false)
       } else {
-        alert("Failed to lock keystore: " + res.error)
+        toast.error("Failed to lock keystore: " + res.error)
       }
     } catch (e) {
-      alert("Error locking keystore: " + e)
+      toast.error("Error locking keystore: " + e)
     }
   }
 

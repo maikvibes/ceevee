@@ -37,7 +37,7 @@ import {
   DropdownMenuContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Trash2, ArrowUpDown, ChevronDown } from "lucide-react";
+import { Trash2, ArrowUpDown, ChevronDown, Loader2 } from "lucide-react";
 
 interface CVDataTableProps {
   search: string;
@@ -200,6 +200,48 @@ export function CVDataTable({
 
   const columns = useMemo<ColumnDef<any>[]>(
     () => [
+      {
+        accessorKey: "id",
+        header: ({ column }) => (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => column.toggleSorting()}
+            className="-ml-3 h-8 data-[state=open]:bg-accent"
+          >
+            ID <ArrowUpDown className="ml-2 size-3" />
+          </Button>
+        ),
+        cell: ({ getValue }) => (
+          <div className="truncate px-2 py-1 text-muted-foreground font-mono text-xs">
+            #{getValue() as number}
+          </div>
+        ),
+        size: 80,
+      },
+      {
+        id: "full_name",
+        accessorFn: (row) => `${row.first_name || ""} ${row.last_name || ""}`.trim(),
+        header: ({ column }) => (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => column.toggleSorting()}
+            className="-ml-3 h-8 data-[state=open]:bg-accent"
+          >
+            Full Name <ArrowUpDown className="ml-2 size-3" />
+          </Button>
+        ),
+        cell: ({ getValue }) => {
+          const val = getValue() as string
+          return (
+            <div className="truncate px-2 py-1 flex items-center" title={val}>
+              {val || <span className="text-muted-foreground/50 italic">Empty</span>}
+            </div>
+          )
+        },
+        size: 200,
+      },
       {
         accessorKey: "first_name",
         header: ({ column }) => (
@@ -424,6 +466,14 @@ export function CVDataTable({
         ref={parentRef}
         className="flex-1 overflow-auto border border-border rounded-lg bg-card relative"
       >
+        {isFetching && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-background/50 backdrop-blur-[1px] pointer-events-none transition-opacity duration-200">
+             <div className="bg-card border shadow-lg rounded-full p-2 flex items-center gap-2 pr-4">
+               <Loader2 className="size-5 animate-spin text-primary" />
+               <span className="text-sm font-medium">Loading data...</span>
+             </div>
+          </div>
+        )}
         <div
           style={{
             height: `${rowVirtualizer.getTotalSize() + 40}px`, // 40px for header

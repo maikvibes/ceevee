@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import { pipelineStatus } from '../main/utils/types';
 
 // Custom APIs for renderer
 const api = {
@@ -9,6 +10,7 @@ const api = {
   getDocumentTasks: () => ipcRenderer.invoke('get-document-tasks'),
   clearDocumentQueue: () => ipcRenderer.invoke('clear-document-queue'),
   removeDocumentTask: (taskId: number) => ipcRenderer.invoke('remove-document-task', taskId),
+  selectFiles: () => ipcRenderer.invoke('select-files'),
 
   // Window Controls
   minimizeWindow: () => ipcRenderer.send('window-minimize'),
@@ -16,7 +18,7 @@ const api = {
   closeWindow: () => ipcRenderer.send('window-close'),
 
   readLocalPdf: (filePath: string) => ipcRenderer.invoke('read-local-pdf', filePath),
-  onDocumentProgress: (callback: (data: { taskId: number, status: string, context?: string }) => void) => {
+  onDocumentProgress: (callback: (data: { taskId: number, status: typeof pipelineStatus[number], context?: string }) => void) => {
     const listener = (_event: any, data: any) => callback(data)
     ipcRenderer.on('document-progress', listener)
     return () => {
@@ -52,6 +54,7 @@ const api = {
   exportCandidatesCsv: (params: any) => ipcRenderer.invoke('export-candidates-csv', params),
   getAppSetting: (key: string) => ipcRenderer.invoke('get-app-setting', key),
   setAppSetting: (key: string, value: string) => ipcRenderer.invoke('set-app-setting', { key, value }),
+  deleteAllData: () => ipcRenderer.invoke('delete-all-data'),
   getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats')
 }
 

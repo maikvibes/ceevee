@@ -23,28 +23,97 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
+import {
+  Command,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command"
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover"
 import { useTheme } from '../components/theme-provider'
-import { Brain, Palette, Link as LinkIcon, Shield } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Brain, Palette, Link as LinkIcon, Shield, Check, ChevronsUpDown, Bot, Loader2 } from 'lucide-react'
+import { SiAnthropic, SiOpenrouter, SiGooglegemini, SiMeta, SiMistralai, SiBaidu, SiNvidia, SiPerplexity, SiXiaomi, SiBytedance, SiMinimax, SiAlibabacloud } from '@icons-pack/react-simple-icons'
+import { useEffect, useState, useMemo } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
 import { MasterPasswordDialog } from '../components/settings/MasterPasswordDialog'
 import { SecuredInput } from '../components/settings/SecuredInput'
 import { Badge } from '@/components/ui/badge'
 import { X, Tags } from 'lucide-react'
+import { toast } from 'sonner'
+
+const ProviderIcon = ({ provider, modelId, className }: { provider: string, modelId?: string, className?: string }) => {
+  let effectiveProvider = provider
+  if (provider === 'openrouter' && modelId && modelId.includes('/')) {
+    effectiveProvider = modelId.split('/')[0].toLowerCase()
+  }
+
+  switch (effectiveProvider) {
+    case 'openai': return <Bot className={className} />
+    case 'anthropic': return <SiAnthropic className={className} />
+    case 'openrouter': return <SiOpenrouter className={className} />
+    case 'google':
+    case 'gemini': return <SiGooglegemini className={className} />
+    case 'meta-llama':
+    case 'meta': return <SiMeta className={className} />
+    case 'mistralai':
+    case 'mistral': return <SiMistralai className={className} />
+    case 'baidu': return <SiBaidu className={className} />
+    case 'nvidia': return <SiNvidia className={className} />
+    case 'perplexity': return <SiPerplexity className={className} />
+    case 'xiaomi': return <SiXiaomi className={className} />
+    case 'bytedance':
+    case 'bytedance-seed': return <SiBytedance className={className} />
+    case 'minimax': return <SiMinimax className={className} />
+    case 'qwen': return <SiAlibabacloud className={className} />
+    default: return <Brain className={className} />
+  }
+}
 
 export function SettingsView() {
   const { theme, setTheme, colorTheme, setColorTheme, customStyle, setCustomStyle } = useTheme()
   const [provider, setProvider] = useState(() => localStorage.getItem('active_ai_provider') || 'openrouter')
   const [apiKey, setApiKey] = useState('')
-  const [models, setModels] = useState<{ model_id: string, name: string }[]>([])
+  const [models, setModels] = useState<any[]>([])
   const [selectedModel, setSelectedModel] = useState('')
+  const [isLoadingModels, setIsLoadingModels] = useState(false)
   const [isFetchingModels, setIsFetchingModels] = useState(false)
   const [showPasswordDialog, setShowPasswordDialog] = useState(false)
+  const [openCombobox, setOpenCombobox] = useState(false)
+  const [searchQuery, setSearchQuery] = useState('')
   const [saveStatus, setSaveStatus] = useState('')
+
+  const filteredModels = useMemo(() => {
+    if (!searchQuery) return models
+    const lowerQuery = searchQuery.toLowerCase()
+    return models.filter((m) =>
+      m.name.toLowerCase().includes(lowerQuery) ||
+      m.model_id.toLowerCase().includes(lowerQuery)
+    )
+  }, [models, searchQuery])
+
+  const [parentEl, setParentEl] = useState<HTMLDivElement | null>(null)
+  const rowVirtualizer = useVirtualizer({
+    count: filteredModels.length,
+    getScrollElement: () => parentEl,
+    estimateSize: () => 32,
+    overscan: 5,
+  })
 
   const [notionKey, setNotionKey] = useState('')
   const [notionDb, setNotionDb] = useState('')
   const [notionAutoSync, setNotionAutoSync] = useState(false)
   const [notionSaveStatus, setNotionSaveStatus] = useState('')
+
+  const [deleteConfirmationString, setDeleteConfirmationString] = useState('')
+  const [deleteInputString, setDeleteInputString] = useState('')
+  const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
+  const [isDeletingAllData, setIsDeletingAllData] = useState(false)
 
   const [customTags, setCustomTags] = useState<any[]>([])
   const [newTag, setNewTag] = useState('')
@@ -98,6 +167,7 @@ export function SettingsView() {
   }
 
   const loadProviderSettings = async () => {
+    setIsLoadingModels(true)
     // Load models
     const res = await window.api.getModels(provider)
     if (res.success && res.data) {
@@ -113,6 +183,7 @@ export function SettingsView() {
     } else {
       setSelectedModel('')
     }
+    setIsLoadingModels(false)
   }
 
   const handleRefreshModels = async () => {
@@ -146,7 +217,6 @@ export function SettingsView() {
     const res = await window.api.saveApiKey(provider, apiKey.trim(), selectedModel)
     if (res.success) {
       setSaveStatus('Saved securely!')
-      setApiKey('')
     } else {
       setSaveStatus(`Error: ${res.error}`)
     }
@@ -171,7 +241,6 @@ export function SettingsView() {
 
     if (res.success) {
       setNotionSaveStatus('Saved successfully!')
-      setNotionKey('')
     } else {
       setNotionSaveStatus(`Error: ${res.error}`)
     }
@@ -180,10 +249,29 @@ export function SettingsView() {
   const executeResetKeystore = async () => {
     const res = await window.api.resetKeystore()
     if (res.success) {
-      window.location.reload()
+      window.dispatchEvent(new Event('keystore-reset'))
+      toast.success("Keystore has been reset successfully.")
     } else {
-      // Could use sonner toast here, but alert is fine as a fallback
-      alert(`Failed to reset keystore: ${res.error}`)
+      toast.error(`Failed to reset keystore: ${res.error}`)
+    }
+  }
+
+  const handleOpenDeleteDialog = () => {
+    setDeleteConfirmationString(Math.random().toString(36).substring(2, 8).toUpperCase())
+    setDeleteInputString('')
+    setIsDeleteDialogOpen(true)
+  }
+
+  const executeDeleteAllData = async () => {
+    if (deleteInputString !== deleteConfirmationString) return
+    setIsDeletingAllData(true)
+    const res = await window.api.deleteAllData()
+    setIsDeletingAllData(false)
+    if (res.success) {
+      toast.success("All data has been deleted successfully.")
+      setIsDeleteDialogOpen(false)
+    } else {
+      toast.error(`Failed to delete data: ${res.error}`)
     }
   }
 
@@ -330,10 +418,30 @@ export function SettingsView() {
                 <SelectValue placeholder="Select provider" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="anthropic">Anthropic</SelectItem>
-                <SelectItem value="openrouter">OpenRouter</SelectItem>
-                <SelectItem value="gemini">Gemini</SelectItem>
+                <SelectItem value="openai">
+                  <div className="flex items-center gap-2">
+                    <ProviderIcon provider="openai" className="size-4" />
+                    OpenAI
+                  </div>
+                </SelectItem>
+                <SelectItem value="anthropic">
+                  <div className="flex items-center gap-2">
+                    <ProviderIcon provider="anthropic" className="size-4" />
+                    Anthropic
+                  </div>
+                </SelectItem>
+                <SelectItem value="openrouter">
+                  <div className="flex items-center gap-2">
+                    <ProviderIcon provider="openrouter" className="size-4" />
+                    OpenRouter
+                  </div>
+                </SelectItem>
+                <SelectItem value="gemini">
+                  <div className="flex items-center gap-2">
+                    <ProviderIcon provider="gemini" className="size-4" />
+                    Gemini
+                  </div>
+                </SelectItem>
               </SelectContent>
             </Select>
           </SettingsNestedRow>
@@ -350,19 +458,83 @@ export function SettingsView() {
           <SettingsNestedRow label="AI Model" alignTop>
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
-                <Select value={selectedModel} onValueChange={setSelectedModel}>
-                  <SelectTrigger className="w-[280px]">
-                    <SelectValue placeholder="Select a model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {models.map(m => (
-                      <SelectItem key={m.model_id} value={m.model_id}>
-                        {m.name}
-                      </SelectItem>
-                    ))}
-                    {models.length === 0 && <SelectItem value="none" disabled>No models loaded</SelectItem>}
-                  </SelectContent>
-                </Select>
+                <Popover open={openCombobox} onOpenChange={setOpenCombobox}>
+                  <PopoverTrigger asChild>
+                    <Button
+                      variant="outline"
+                      role="combobox"
+                      aria-expanded={openCombobox}
+                      disabled={isLoadingModels}
+                      className="w-[280px] justify-between font-normal"
+                    >
+                      <span className="flex items-center truncate">
+                        {isLoadingModels ? (
+                          <span className="flex items-center text-muted-foreground">
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            Loading models...
+                          </span>
+                        ) : selectedModel ? (
+                          <>
+                            <ProviderIcon provider={provider} modelId={selectedModel} className="mr-2 size-4 opacity-70" />
+                            {models.find((m) => m.model_id === selectedModel)?.name || selectedModel}
+                          </>
+                        ) : (
+                          "Select a model..."
+                        )}
+                      </span>
+                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent className="w-[280px] p-0">
+                    <Command shouldFilter={false}>
+                      <CommandInput placeholder="Search models..." value={searchQuery} onValueChange={setSearchQuery} />
+                      <CommandList ref={setParentEl}>
+                        {filteredModels.length === 0 && <CommandEmpty>No model found.</CommandEmpty>}
+                        <CommandGroup>
+                          <div
+                            style={{
+                              height: `${rowVirtualizer.getTotalSize()}px`,
+                              width: '100%',
+                              position: 'relative',
+                            }}
+                          >
+                            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                              const m = filteredModels[virtualRow.index]
+                              return (
+                                <CommandItem
+                                  key={m.model_id}
+                                  value={`${m.name} ${m.model_id}`} // allow searching by name or id
+                                  onSelect={() => {
+                                    setSelectedModel(m.model_id)
+                                    setOpenCombobox(false)
+                                  }}
+                                  style={{
+                                    position: 'absolute',
+                                    top: 0,
+                                    left: 0,
+                                    width: '100%',
+                                    height: `${virtualRow.size}px`,
+                                    transform: `translateY(${virtualRow.start}px)`,
+                                  }}
+                                >
+                                  <div className="flex items-center truncate">
+                                    <ProviderIcon provider={provider} modelId={m.model_id} className="mr-2 size-4 opacity-50 flex-shrink-0" />
+                                    <span className="truncate">{m.name}</span>
+                                  </div>
+                                  <Check
+                                    className={`ml-auto h-4 w-4 flex-shrink-0 ${
+                                      selectedModel === m.model_id ? "opacity-100" : "opacity-0"
+                                    }`}
+                                  />
+                                </CommandItem>
+                              )
+                            })}
+                          </div>
+                        </CommandGroup>
+                      </CommandList>
+                    </Command>
+                  </PopoverContent>
+                </Popover>
                 <Button variant="outline" size="sm" onClick={handleRefreshModels} disabled={isFetchingModels}>
                   {isFetchingModels ? 'Fetching...' : 'Fetch List'}
                 </Button>
@@ -451,6 +623,53 @@ export function SettingsView() {
                       <AlertDialogAction onClick={executeResetKeystore} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
                         Yes, reset keystore
                       </AlertDialogAction>
+                    </AlertDialogFooter>
+                  </AlertDialogContent>
+                </AlertDialog>
+              </div>
+            </div>
+          </SettingsNestedRow>
+          
+          <div className="h-px bg-border my-2 mx-6" />
+
+          <SettingsNestedRow label="Delete All Data" alignTop>
+            <div className="flex flex-col gap-3 max-w-[400px]">
+              <p className="text-sm text-muted-foreground leading-relaxed">
+                This will permanently delete all parsed candidates, documents, and synchronization history. Your settings and API keys will be preserved.
+              </p>
+              <div>
+                <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
+                  <AlertDialogTrigger asChild>
+                    <Button variant="destructive" onClick={handleOpenDeleteDialog}>
+                      Delete All Data
+                    </Button>
+                  </AlertDialogTrigger>
+                  <AlertDialogContent>
+                    <AlertDialogHeader>
+                      <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
+                      <AlertDialogDescription>
+                        This action cannot be undone. This will permanently delete all your candidate data.
+                      </AlertDialogDescription>
+                      <div className="mt-4 flex flex-col gap-2">
+                        <Label className="text-foreground">
+                          Type <strong className="select-none bg-muted px-1.5 py-0.5 rounded text-destructive">{deleteConfirmationString}</strong> to confirm.
+                        </Label>
+                        <Input 
+                          value={deleteInputString}
+                          onChange={(e) => setDeleteInputString(e.target.value.toUpperCase())}
+                          placeholder="Enter confirmation string"
+                        />
+                      </div>
+                    </AlertDialogHeader>
+                    <AlertDialogFooter>
+                      <AlertDialogCancel>Cancel</AlertDialogCancel>
+                      <Button 
+                        variant="destructive" 
+                        onClick={executeDeleteAllData} 
+                        disabled={deleteInputString !== deleteConfirmationString || isDeletingAllData}
+                      >
+                        {isDeletingAllData ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Deleting...</> : "Yes, delete all data"}
+                      </Button>
                     </AlertDialogFooter>
                   </AlertDialogContent>
                 </AlertDialog>

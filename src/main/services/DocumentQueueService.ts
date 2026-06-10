@@ -30,7 +30,7 @@ export class DocumentQueueService {
   async resumeUnfinishedTasks() {
     const unfinishedTasks = db.prepare(`
       SELECT * FROM document_tasks 
-      WHERE status != 'Complete' AND status != 'Failed'
+      WHERE status != 'Complete' AND status != 'Failed' AND status != 'Warning'
     `).all() as { id: number, file_path: string }[]
 
     for (const task of unfinishedTasks) {
@@ -59,7 +59,7 @@ export class DocumentQueueService {
       try {
         await this.processDocument(filePath, taskId, provider)
       } catch (err: any) {
-        this.updateTaskStatus(taskId, 'Failed', undefined, err.message)
+        this.updateTaskStatus(taskId, 'Failed', filePath, err.message)
       }
     })
   }
@@ -80,7 +80,7 @@ export class DocumentQueueService {
     })
 
     // 2. AI Processing
-    this.updateTaskStatus(taskId, 'AI_Analyzing', filePath)
+    this.updateTaskStatus(taskId, 'Analyzing', filePath)
 
     // Fetch decrypted API Key
     const activeProvider = provider || 'openrouter' // Default fallback
@@ -141,12 +141,12 @@ export class DocumentQueueService {
         .run(status, taskId)
     }
 
-    this.notifyUI(taskId, status, context)
+    this.notifyUI(taskId, status, context, errorMessage)
   }
 
-  private notifyUI(taskId: number, status: string, context?: string) {
+  private notifyUI(taskId: number, status: string, context?: string, errorMessage?: string) {
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('document-progress', { taskId, status, context })
+      this.mainWindow.webContents.send('document-progress', { taskId, status, context, errorMessage })
     }
   }
 }

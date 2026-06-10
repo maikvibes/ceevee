@@ -1,4 +1,5 @@
 import { ElectronAPI } from "@electron-toolkit/preload";
+export const pipelineStatus = ["Queued", "Extracting", "Analyzing", "Syncing to Notion", "Uploading CV to Notion", "Attaching CV to Notion Page", "Complete", "Failed"] as const;
 
 declare global {
   interface Window {
@@ -13,6 +14,7 @@ declare global {
       getDocumentTasks: () => Promise<any[]>;
       clearDocumentQueue: () => Promise<{ success: boolean; error?: string }>;
       removeDocumentTask: (taskId: number) => Promise<{ success: boolean; error?: string }>;
+      selectFiles: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
 
       // Window Controls
       minimizeWindow: () => void;
@@ -25,8 +27,9 @@ declare global {
       onDocumentProgress: (
         callback: (data: {
           taskId: number;
-          status: string;
+          status: typeof pipelineStatus[number];
           context?: string;
+          errorMessage?: string;
         }) => void,
       ) => () => void;
       getCandidates: (params: {
@@ -94,6 +97,7 @@ declare global {
         key: string,
         value: string,
       ) => Promise<{ success: boolean; error?: string }>;
+      deleteAllData: () => Promise<{ success: boolean; error?: string }>;
       getDashboardStats: () => Promise<{ success: boolean; data?: any; error?: string }>;
 
     };

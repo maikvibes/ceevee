@@ -1,4 +1,4 @@
-import { ipcMain } from "electron";
+import { ipcMain, dialog } from "electron";
 import * as fs from "fs";
 import { documentQueue } from "../services/DocumentQueueService";
 import db from "../db";
@@ -37,6 +37,26 @@ class DocumentController {
         db.prepare("DELETE FROM document_tasks").run();
         documentQueue.clearQueue();
         return { success: true };
+      } catch (error: any) {
+        return { success: false, error: error.message };
+      }
+    });
+
+    ipcMain.handle("select-files", async () => {
+      try {
+        const result = await dialog.showOpenDialog({
+          properties: ["openFile", "multiSelections"],
+          filters: [
+            { name: "Documents", extensions: ["pdf", "docx"] },
+            { name: "All Files", extensions: ["*"] }
+          ]
+        });
+        
+        if (result.canceled) {
+          return { success: true, filePaths: [] };
+        }
+        
+        return { success: true, filePaths: result.filePaths };
       } catch (error: any) {
         return { success: false, error: error.message };
       }
