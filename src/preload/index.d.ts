@@ -100,6 +100,11 @@ declare global {
       deleteAllData: () => Promise<{ success: boolean; error?: string }>;
       getDashboardStats: () => Promise<{ success: boolean; data?: any; error?: string }>;
 
+      // Auto-Updater
+      updater: {
+        installUpdate: () => void;
+        onUpdateDownloaded: (callback: (info: { version: string }) => void) => () => void;
+      };
     };
   }
 }

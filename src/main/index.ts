@@ -6,6 +6,7 @@ import { documentController } from './controllers/DocumentController'
 import { candidateController } from './controllers/CandidateController'
 import { settingsController } from './controllers/SettingsController'
 import { documentQueue } from './services/DocumentQueueService'
+import { updateService } from './services/UpdateService'
 
 function createWindow(): void {
   // Create the browser window.
@@ -95,6 +96,8 @@ app.whenReady().then(() => {
   if (mainWindow) {
     documentQueue.setWindow(mainWindow)
     documentQueue.resumeUnfinishedTasks()
+    updateService.setWindow(mainWindow)
+    setTimeout(() => updateService.checkForUpdates(), 5000)
   }
 
   app.on('activate', function () {

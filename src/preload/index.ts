@@ -55,7 +55,19 @@ const api = {
   getAppSetting: (key: string) => ipcRenderer.invoke('get-app-setting', key),
   setAppSetting: (key: string, value: string) => ipcRenderer.invoke('set-app-setting', { key, value }),
   deleteAllData: () => ipcRenderer.invoke('delete-all-data'),
-  getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats')
+  getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats'),
+
+  // Auto-Updater
+  updater: {
+    installUpdate: () => ipcRenderer.send('install-update'),
+    onUpdateDownloaded: (callback: (info: { version: string }) => void) => {
+      const listener = (_event: any, info: any) => callback(info)
+      ipcRenderer.on('update-downloaded', listener)
+      return () => {
+        ipcRenderer.removeListener('update-downloaded', listener)
+      }
+    }
+  }
 }
 
 // Use `contextBridge` APIs to expose Electron APIs to

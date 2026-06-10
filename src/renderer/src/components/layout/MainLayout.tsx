@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { Home, Users, Settings, ChevronLeft, ChevronRight, Loader2, UploadCloud } from 'lucide-react'
+import { Home, Users, Settings, ChevronLeft, ChevronRight, Loader2, UploadCloud, ArrowDownToLine } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Label } from '../ui/label'
 import { useTaskQueue } from '../../contexts/TaskQueueContext'
+import { Button } from '../ui/button'
 
 interface MainLayoutProps {
   children: React.ReactNode
@@ -12,10 +13,20 @@ export function MainLayout({ children }: MainLayoutProps) {
   const [isCollapsed, setIsCollapsed] = useState(() => {
     return localStorage.getItem('sidebar_collapsed') === 'true'
   })
+  const [updateReady, setUpdateReady] = useState(false)
+  const [updateVersion, setUpdateVersion] = useState('')
 
   useEffect(() => {
     localStorage.setItem('sidebar_collapsed', isCollapsed.toString())
   }, [isCollapsed])
+
+  useEffect(() => {
+    const cleanup = window.api.updater.onUpdateDownloaded((info) => {
+      setUpdateReady(true)
+      setUpdateVersion(info.version)
+    })
+    return cleanup
+  }, [])
 
   const location = useLocation()
   const navigate = useNavigate()
@@ -89,16 +100,31 @@ export function MainLayout({ children }: MainLayoutProps) {
       <main className="flex-1 flex flex-col overflow-hidden">
         {/* Unified Header */}
         <header className="px-8 py-6 shrink-0 border-b border-border/40 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 z-10">
-          <Label className="text-3xl">
-            {location.pathname === '/' && 'Dashboard'}
-            {location.pathname === '/cv-list' && 'Candidates'}
-            {location.pathname === '/settings' && 'Settings'}
-          </Label>
-          <p className="text-muted-foreground">
-            {location.pathname === '/' && 'Process and extract data from CVs.'}
-            {location.pathname === '/cv-list' && 'Manage and search through processed CVs.'}
-            {location.pathname === '/settings' && 'Manage your application preferences and AI integrations.'}
-          </p>
+          <div className="flex items-center justify-between">
+            <div>
+              <Label className="text-3xl">
+                {location.pathname === '/' && 'Dashboard'}
+                {location.pathname === '/cv-list' && 'Candidates'}
+                {location.pathname === '/settings' && 'Settings'}
+              </Label>
+              <p className="text-muted-foreground">
+                {location.pathname === '/' && 'Process and extract data from CVs.'}
+                {location.pathname === '/cv-list' && 'Manage and search through processed CVs.'}
+                {location.pathname === '/settings' && 'Manage your application preferences and AI integrations.'}
+              </p>
+            </div>
+            {updateReady && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-2 border-primary/50 text-primary hover:bg-primary hover:text-primary-foreground animate-pulse"
+                onClick={() => window.api.updater.installUpdate()}
+              >
+                <ArrowDownToLine className="size-4" />
+                Restart to update{updateVersion ? ` (v${updateVersion})` : ''}
+              </Button>
+            )}
+          </div>
         </header>
 
         <div className="flex-1 overflow-y-auto p-8">
