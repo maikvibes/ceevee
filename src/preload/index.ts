@@ -56,6 +56,8 @@ const api = {
   setAppSetting: (key: string, value: string) => ipcRenderer.invoke('set-app-setting', { key, value }),
   deleteAllData: () => ipcRenderer.invoke('delete-all-data'),
   getDashboardStats: () => ipcRenderer.invoke('get-dashboard-stats'),
+  getAppVersion: () => ipcRenderer.invoke('get-app-version'),
+  getAppEnv: () => ipcRenderer.invoke('get-app-env'),
 
   // Auto-Updater
   updater: {

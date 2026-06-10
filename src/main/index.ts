@@ -83,6 +83,10 @@ app.whenReady().then(() => {
     if (win) win.close()
   })
 
+  // App version & environment
+  ipcMain.handle('get-app-version', () => app.getVersion())
+  ipcMain.handle('get-app-env', () => (is.dev ? 'dev' : 'production'))
+
   // Register Controllers
   userController.registerHandlers()
   documentController.registerHandlers()

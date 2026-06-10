@@ -69,7 +69,7 @@ export function CVSearchAndFilterBar({
         <Input
           type="text"
           placeholder="Search candidates, skills, or CV contents..."
-          className="flex-1 min-w-[200px]"
+          className="flex-1 min-w-50"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -77,7 +77,7 @@ export function CVSearchAndFilterBar({
           <Button
             onClick={onExportCsv}
             variant="outline"
-            className="gap-2 flex-shrink-0"
+            className="gap-2 shrink-0"
           >
             <Download className="size-4" /> Export CSV
           </Button>
@@ -85,7 +85,7 @@ export function CVSearchAndFilterBar({
       </div>
       <div className="flex flex-wrap gap-2 items-center">
         <Select value={tag} onValueChange={setTag}>
-          <SelectTrigger className="w-[180px]">
+          <SelectTrigger className="w-45">
             <SelectValue placeholder="Tags" />
           </SelectTrigger>
           <SelectContent>
@@ -99,7 +99,7 @@ export function CVSearchAndFilterBar({
         </Select>
 
         <Select value={status} onValueChange={setStatus}>
-          <SelectTrigger className="w-[180px]">
+          <SelectTrigger className="w-45">
             <SelectValue placeholder="Status" />
           </SelectTrigger>
           <SelectContent>
@@ -116,7 +116,7 @@ export function CVSearchAndFilterBar({
         </Select>
 
         <Select value={jobType} onValueChange={setJobType}>
-          <SelectTrigger className="w-[180px]">
+          <SelectTrigger className="w-45">
             <SelectValue placeholder="Job Type" />
           </SelectTrigger>
           <SelectContent>
@@ -135,7 +135,7 @@ export function CVSearchAndFilterBar({
               id="date"
               variant={"outline"}
               className={cn(
-                "w-[260px] justify-start text-left font-normal",
+                "w-65 justify-start text-left font-normal",
                 !dateRange && "text-muted-foreground",
               )}
             >

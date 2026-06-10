@@ -99,6 +99,8 @@ declare global {
       ) => Promise<{ success: boolean; error?: string }>;
       deleteAllData: () => Promise<{ success: boolean; error?: string }>;
       getDashboardStats: () => Promise<{ success: boolean; data?: any; error?: string }>;
+      getAppVersion: () => Promise<string>;
+      getAppEnv: () => Promise<string>;
 
       // Auto-Updater
       updater: {
