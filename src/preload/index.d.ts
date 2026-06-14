@@ -1,6 +1,25 @@
 import { ElectronAPI } from "@electron-toolkit/preload";
 export const pipelineStatus = ["Queued", "Extracting", "Analyzing", "Syncing to Notion", "Uploading CV to Notion", "Attaching CV to Notion Page", "Complete", "Failed"] as const;
 
+type EmbeddingProviderName = "local" | "openai" | "gemini" | "openrouter";
+
+interface CandidateSearchFilter {
+  id: string;
+  value: string | number | boolean | null;
+}
+
+interface VectorSearchSettings {
+  vector_search_enabled: boolean;
+  vector_db_provider: "chromadb";
+  chroma_host: string;
+  chroma_port: number;
+  chroma_ssl: boolean;
+  embedding_provider: EmbeddingProviderName;
+  embedding_model: string;
+  embedding_dimension: number;
+  embedding_index_status: "disabled" | "not_indexed" | "indexing" | "indexed" | "stale" | "error";
+}
+
 declare global {
   interface Window {
     electron: ElectronAPI;
@@ -48,6 +67,38 @@ declare global {
         updates: Record<string, any>,
       ) => Promise<any>;
       deleteCandidate: (id: number) => Promise<any>;
+      searchCandidatesForJobDescription: (params: {
+        jobDescription: string;
+        filters?: CandidateSearchFilter[];
+        limit?: number;
+      }) => Promise<{
+        success: boolean;
+        data?: {
+          results: Array<{
+            candidate: Record<string, unknown>;
+            tagScore: number;
+            semanticScore: number | null;
+            score: number;
+            exactReasons: string[];
+            semanticReasons: string[];
+            matchingTags: string[];
+          }>;
+          semantic: { available: boolean; reason: string | null };
+        };
+        error?: string;
+      }>;
+      getJobSearchHistory: (limit?: number) => Promise<{
+        success: boolean;
+        data?: Array<{
+          id: number;
+          job_description: string;
+          filters: CandidateSearchFilter[];
+          result_count: number;
+          semantic_available: boolean;
+          created_at: string;
+        }>;
+        error?: string;
+      }>;
       getCustomTags: () => Promise<{
         success: boolean;
         data?: any[];
@@ -97,6 +148,33 @@ declare global {
         key: string,
         value: string,
       ) => Promise<{ success: boolean; error?: string }>;
+      getVectorSearchStatus: () => Promise<{
+        success: boolean;
+        data?: {
+          settings: VectorSearchSettings;
+          chromaReachable: boolean;
+          indexedChunks: number;
+          candidateCount: number;
+          message: string;
+        };
+        error?: string;
+      }>;
+      testVectorDbConnection: (config: {
+        chroma_host?: string;
+        chroma_port?: number;
+        chroma_ssl?: boolean;
+      }) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
+      saveVectorSearchSettings: (
+        settings: Partial<VectorSearchSettings>,
+      ) => Promise<{ success: boolean; data?: VectorSearchSettings; error?: string }>;
+      reindexCandidateVectors: () => Promise<{
+        success: boolean;
+        data?: { indexedCandidates: number };
+        error?: string;
+      }>;
+      getEmbeddingModels: (
+        provider: EmbeddingProviderName,
+      ) => Promise<{ success: boolean; data?: Array<{ model_id: string; name: string }>; error?: string }>;
       deleteAllData: () => Promise<{ success: boolean; error?: string }>;
       getDashboardStats: () => Promise<{ success: boolean; data?: any; error?: string }>;
       getAppVersion: () => Promise<string>;

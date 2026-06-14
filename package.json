@@ -8,6 +8,7 @@
   "scripts": {
     "format": "prettier --write .",
     "lint": "eslint --cache .",
+    "test": "vitest run",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
@@ -23,13 +24,17 @@
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
+    "@google/genai": "^2.8.0",
+    "@huggingface/transformers": "^4.2.0",
     "@icons-pack/react-simple-icons": "^13.13.0",
     "@notionhq/client": "^5.22.0",
+    "@openrouter/sdk": "^0.12.79",
     "@radix-ui/react-slot": "^1.2.5",
     "@tailwindcss/vite": "^4.3.0",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.14.2",
     "better-sqlite3": "^12.10.0",
+    "chromadb": "^3.4.3",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
@@ -39,6 +44,7 @@
     "lucide-react": "^1.17.0",
     "mammoth": "^1.12.0",
     "next-themes": "^0.4.6",
+    "openai": "^6.42.0",
     "p-queue": "^6.6.2",
     "pdf-parse": "^2.4.5",
     "radix-ui": "^1.5.0",
@@ -74,6 +80,7 @@
     "react-dom": "^19.2.1",
     "sharp": "^0.34.5",
     "typescript": "^5.9.3",
-    "vite": "^7.2.6"
+    "vite": "^7.2.6",
+    "vitest": "^4.1.8"
   }
 }

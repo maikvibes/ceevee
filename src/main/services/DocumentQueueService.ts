@@ -4,6 +4,7 @@ import { AIProcessingService } from './AIProcessingService'
 import { KeyStoreService } from './KeyStoreService'
 import { NotionSyncService } from './NotionSyncService'
 import { BrowserWindow } from 'electron'
+import { VectorSearchService } from './VectorSearchService'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PQueue = require('p-queue').default || require('p-queue')
@@ -115,7 +116,10 @@ export class DocumentQueueService {
     )
     const newCandidateId = insertInfo.lastInsertRowid as number
 
-    // 4. Notion Auto-Sync
+    // 4. Optional semantic vector indexing
+    await VectorSearchService.indexCandidate(newCandidateId)
+
+    // 5. Notion Auto-Sync
     try {
       if (NotionSyncService.isAutoSyncEnabled()) {
         await NotionSyncService.syncCandidate(newCandidateId, (progressStatus) => {
@@ -128,7 +132,7 @@ export class DocumentQueueService {
       return
     }
 
-    // 5. Mark Complete
+    // 6. Mark Complete
     this.updateTaskStatus(taskId, 'Complete', filePath)
   }
 

@@ -4,42 +4,47 @@ export class OpenRouterProvider implements IAIProvider {
   async generateCompletion(prompt: string, apiKey: string, model: string): Promise<string> {
     if (!apiKey) throw new Error('OpenRouter API key is missing.')
 
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey.trim().replace(/^Bearer\s+/i, '')}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'http://localhost', // Required by OpenRouter
-        'X-Title': 'Magical Heisenberg', // Required by OpenRouter
-      },
-      body: JSON.stringify({
-        model: model || 'openai/gpt-4o-mini',
-        messages: [
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.1,
+    try {
+      const { OpenRouter } = await import('@openrouter/sdk')
+      const openRouter = new OpenRouter({
+        apiKey: apiKey.trim().replace(/^Bearer\s+/i, ''),
+        httpReferer: 'http://localhost',
+        appTitle: 'CeeVee',
+        appCategories: 'productivity'
       })
-    })
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      let friendlyMessage = errorText
-      try {
-        const parsed = JSON.parse(errorText)
-        if (parsed.error?.metadata?.raw) {
-          friendlyMessage = parsed.error.metadata.raw
-        } else if (parsed.error?.message) {
-          friendlyMessage = parsed.error.message
-        } else if (parsed.message) {
-          friendlyMessage = parsed.message
+      const response = await openRouter.chat.send({
+        chatRequest: {
+          model: model || 'openai/gpt-4o-mini',
+          messages: [
+            { role: 'user', content: prompt }
+          ],
+          temperature: 0.1
         }
-      } catch (e) {
-        // Not JSON, fallback to raw text
-      }
-      throw new Error(`OpenRouter API error (${response.status}): ${friendlyMessage}`)
-    }
+      })
 
-    const data = await response.json()
-    return data.choices?.[0]?.message?.content || ''
+      return response.choices?.[0]?.message?.content || ''
+    } catch (error: unknown) {
+      throw new Error(`OpenRouter API error: ${extractOpenRouterErrorMessage(error)}`)
+    }
   }
+}
+
+function extractOpenRouterErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'object' && error !== null) {
+    const record = error as Record<string, unknown>
+    const nestedError = record.error
+    if (typeof nestedError === 'object' && nestedError !== null) {
+      const nested = nestedError as Record<string, unknown>
+      const metadata = nested.metadata
+      if (typeof metadata === 'object' && metadata !== null) {
+        const raw = (metadata as Record<string, unknown>).raw
+        if (typeof raw === 'string') return raw
+      }
+      if (typeof nested.message === 'string') return nested.message
+    }
+    if (typeof record.message === 'string') return record.message
+  }
+  return String(error)
 }

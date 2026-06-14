@@ -37,7 +37,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { useTheme } from '../components/theme-provider'
-import { Brain, Palette, Link as LinkIcon, Shield, Check, ChevronsUpDown, Bot, Loader2 } from 'lucide-react'
+import { Brain, Palette, Link as LinkIcon, Shield, Check, ChevronsUpDown, Bot, Loader2, Database, RefreshCw } from 'lucide-react'
 import { SiAnthropic, SiOpenrouter, SiGooglegemini, SiMeta, SiMistralai, SiBaidu, SiNvidia, SiPerplexity, SiXiaomi, SiBytedance, SiMinimax, SiAlibabacloud } from '@icons-pack/react-simple-icons'
 import { useEffect, useState, useMemo } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
@@ -73,6 +73,33 @@ const ProviderIcon = ({ provider, modelId, className }: { provider: string, mode
     case 'qwen': return <SiAlibabacloud className={className} />
     default: return <Brain className={className} />
   }
+}
+
+type EmbeddingProviderName = 'local' | 'openai' | 'gemini' | 'openrouter'
+
+interface VectorSearchSettings {
+  vector_search_enabled: boolean
+  vector_db_provider: 'chromadb'
+  chroma_host: string
+  chroma_port: number
+  chroma_ssl: boolean
+  embedding_provider: EmbeddingProviderName
+  embedding_model: string
+  embedding_dimension: number
+  embedding_index_status: 'disabled' | 'not_indexed' | 'indexing' | 'indexed' | 'stale' | 'error'
+}
+
+interface VectorStatus {
+  settings: VectorSearchSettings
+  chromaReachable: boolean
+  indexedChunks: number
+  candidateCount: number
+  message: string
+}
+
+interface EmbeddingModel {
+  model_id: string
+  name: string
 }
 
 export function SettingsView() {
@@ -118,6 +145,11 @@ export function SettingsView() {
   const [customTags, setCustomTags] = useState<any[]>([])
   const [newTag, setNewTag] = useState('')
   const [newJobType, setNewJobType] = useState('')
+  const [vectorStatus, setVectorStatus] = useState<VectorStatus | null>(null)
+  const [vectorSettings, setVectorSettings] = useState<VectorSearchSettings | null>(null)
+  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([])
+  const [isTestingVectorDb, setIsTestingVectorDb] = useState(false)
+  const [isReindexing, setIsReindexing] = useState(false)
 
   useEffect(() => {
     localStorage.setItem('active_ai_provider', provider)
@@ -132,7 +164,73 @@ export function SettingsView() {
       if (res.success) setNotionAutoSync(res.value === 'true')
     })
     loadTags()
+    loadVectorStatus()
   }, [])
+
+  useEffect(() => {
+    if (vectorSettings) {
+      loadEmbeddingModels(vectorSettings.embedding_provider)
+    }
+  }, [vectorSettings?.embedding_provider])
+
+  const loadVectorStatus = async () => {
+    const res = await window.api.getVectorSearchStatus()
+    if (res.success && res.data) {
+      setVectorStatus(res.data)
+      setVectorSettings(res.data.settings)
+      await loadEmbeddingModels(res.data.settings.embedding_provider)
+    }
+  }
+
+  const loadEmbeddingModels = async (embeddingProvider: EmbeddingProviderName) => {
+    const res = await window.api.getEmbeddingModels(embeddingProvider)
+    if (res.success && res.data) {
+      setEmbeddingModels(res.data)
+    } else {
+      setEmbeddingModels([])
+    }
+  }
+
+  const updateVectorSetting = <K extends keyof VectorSearchSettings>(key: K, value: VectorSearchSettings[K]) => {
+    setVectorSettings((current) => current ? { ...current, [key]: value } : current)
+  }
+
+  const handleSaveVectorSettings = async () => {
+    if (!vectorSettings) return
+    const res = await window.api.saveVectorSearchSettings(vectorSettings)
+    if (res.success) {
+      toast.success('Vector search settings saved.')
+      await loadVectorStatus()
+    } else {
+      toast.error(`Save failed: ${res.error}`)
+    }
+  }
+
+  const handleTestVectorConnection = async () => {
+    if (!vectorSettings) return
+    setIsTestingVectorDb(true)
+    const res = await window.api.testVectorDbConnection(vectorSettings)
+    setIsTestingVectorDb(false)
+    if (res.success) {
+      toast.success(`ChromaDB connected${res.data?.version ? ` (${res.data.version})` : ''}.`)
+      await loadVectorStatus()
+    } else {
+      toast.error(`ChromaDB unavailable: ${res.error}`)
+    }
+  }
+
+  const handleReindexVectors = async () => {
+    setIsReindexing(true)
+    const res = await window.api.reindexCandidateVectors()
+    setIsReindexing(false)
+    if (res.success) {
+      toast.success(`Indexed ${res.data?.indexedCandidates || 0} candidates.`)
+      await loadVectorStatus()
+    } else {
+      toast.error(`Reindex failed: ${res.error}`)
+      await loadVectorStatus()
+    }
+  }
 
   const loadTags = async () => {
     const res = await window.api.getCustomTags()
@@ -546,6 +644,129 @@ export function SettingsView() {
               </div>
             </div>
           </SettingsNestedRow>
+        </SettingsAccordionItem>
+
+        <SettingsAccordionItem
+          value="item-vector-search"
+          icon={<Database className="size-5" />}
+          title="Vector Search"
+          subtitle="Optional ChromaDB semantic matching for job-description search"
+        >
+          {vectorSettings && (
+            <div className="p-6 space-y-5">
+              <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge variant={vectorSettings.vector_search_enabled ? 'default' : 'secondary'}>
+                    {vectorSettings.vector_search_enabled ? 'Enabled' : 'Disabled'}
+                  </Badge>
+                  <Badge variant={vectorStatus?.chromaReachable ? 'default' : 'outline'}>
+                    {vectorStatus?.chromaReachable ? 'Chroma reachable' : 'Chroma offline'}
+                  </Badge>
+                  <Badge variant="outline">{vectorSettings.embedding_index_status}</Badge>
+                  <span className="text-muted-foreground">
+                    {vectorStatus?.indexedChunks || 0} chunks across {vectorStatus?.candidateCount || 0} candidates
+                  </span>
+                </div>
+                <p className="mt-2 text-muted-foreground">
+                  Start Chroma with <code className="rounded bg-background px-1 py-0.5">chroma run --path ./chroma</code>, then test the connection.
+                </p>
+              </div>
+
+              <SettingsNestedRow label="Enable Semantic Search">
+                <input
+                  type="checkbox"
+                  checked={vectorSettings.vector_search_enabled}
+                  onChange={(event) => updateVectorSetting('vector_search_enabled', event.target.checked)}
+                  className="h-4 w-4 rounded"
+                />
+              </SettingsNestedRow>
+
+              <SettingsNestedRow label="Chroma Endpoint">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Input
+                    value={vectorSettings.chroma_host}
+                    onChange={(event) => updateVectorSetting('chroma_host', event.target.value)}
+                    className="w-44"
+                  />
+                  <Input
+                    type="number"
+                    value={vectorSettings.chroma_port}
+                    onChange={(event) => updateVectorSetting('chroma_port', Number(event.target.value))}
+                    className="w-24"
+                  />
+                  <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={vectorSettings.chroma_ssl}
+                      onChange={(event) => updateVectorSetting('chroma_ssl', event.target.checked)}
+                    />
+                    SSL
+                  </label>
+                  <Button variant="outline" size="sm" onClick={handleTestVectorConnection} disabled={isTestingVectorDb}>
+                    {isTestingVectorDb ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
+                    Test
+                  </Button>
+                </div>
+              </SettingsNestedRow>
+
+              <SettingsNestedRow label="Embedding Provider">
+                <Select
+                  value={vectorSettings.embedding_provider}
+                  onValueChange={(value) => {
+                    const providerName = value as EmbeddingProviderName
+                    updateVectorSetting('embedding_provider', providerName)
+                  }}
+                >
+                  <SelectTrigger className="w-[220px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="local">Local</SelectItem>
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="gemini">Gemini</SelectItem>
+                    <SelectItem value="openrouter">OpenRouter</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingsNestedRow>
+
+              <SettingsNestedRow label="Embedding Model">
+                <Select
+                  value={vectorSettings.embedding_model}
+                  onValueChange={(value) => updateVectorSetting('embedding_model', value)}
+                >
+                  <SelectTrigger className="w-[320px]">
+                    <SelectValue placeholder="Select embedding model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {embeddingModels.map((model) => (
+                      <SelectItem key={model.model_id} value={model.model_id}>
+                        {model.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </SettingsNestedRow>
+
+              <SettingsNestedRow label="Embedding Dimension">
+                <Input
+                  type="number"
+                  value={vectorSettings.embedding_dimension}
+                  onChange={(event) => updateVectorSetting('embedding_dimension', Number(event.target.value))}
+                  className="w-28"
+                />
+              </SettingsNestedRow>
+
+              <SettingsNestedRow label="" alignTop>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="secondary" onClick={handleSaveVectorSettings}>Save Vector Settings</Button>
+                  <Button variant="outline" onClick={handleReindexVectors} disabled={isReindexing || !vectorSettings.vector_search_enabled}>
+                    {isReindexing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
+                    Reindex Candidates
+                  </Button>
+                </div>
+              </SettingsNestedRow>
+            </div>
+          )}
         </SettingsAccordionItem>
 
         <SettingsAccordionItem

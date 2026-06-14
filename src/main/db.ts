@@ -84,6 +84,15 @@ db.exec(`
     setting_key TEXT PRIMARY KEY,
     setting_value TEXT NOT NULL
   );
+
+  CREATE TABLE IF NOT EXISTS job_search_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_description TEXT NOT NULL,
+    filters TEXT,
+    result_count INTEGER DEFAULT 0,
+    semantic_available INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
 `)
 
 // Seed default job types if they don't exist
