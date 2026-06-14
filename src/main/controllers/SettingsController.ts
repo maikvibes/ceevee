@@ -2,6 +2,8 @@ import { ipcMain } from 'electron'
 import db from '../db'
 import { KeyStoreService } from '../services/KeyStoreService'
 import { documentQueue } from '../services/DocumentQueueService'
+import { VectorSearchService, VectorSearchSettings } from '../services/VectorSearchService'
+import { EmbeddingProviderName } from '../services/EmbeddingProvider'
 
 class SettingsController {
   registerHandlers() {
@@ -91,6 +93,7 @@ class SettingsController {
           db.prepare('DELETE FROM notion_sync_history').run()
           db.prepare('DELETE FROM document_tasks').run()
           db.prepare('DELETE FROM candidates').run()
+          db.prepare('DELETE FROM job_search_history').run()
         })()
         return { success: true }
       } catch (error: any) {
@@ -184,14 +187,22 @@ class SettingsController {
         }
 
         if (provider === 'openrouter') {
-          const res = await fetch('https://openrouter.ai/api/v1/models')
-          if (!res.ok) throw new Error('Failed to fetch OpenRouter models')
-          const data = await res.json()
+          const keyRow = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as EncryptedKeyRow | undefined
+          if (!keyRow) throw new Error('Save an OpenRouter API key before fetching models.')
+
+          const { OpenRouter } = await import('@openrouter/sdk')
+          const openRouter = new OpenRouter({
+            apiKey: KeyStoreService.decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag),
+            httpReferer: 'http://localhost',
+            appTitle: 'CeeVee',
+            appCategories: 'productivity'
+          })
+          const data = await openRouter.models.list() as OpenRouterModelListResponse
           
           const insert = db.prepare('INSERT OR IGNORE INTO ai_models (provider, model_id, name) VALUES (?, ?, ?)')
           db.transaction(() => {
-            for (const m of data.data) {
-              insert.run(provider, m.id, m.name)
+            for (const m of data.data || []) {
+              insert.run(provider, m.id, m.name || m.id)
             }
           })()
           return { success: true }
@@ -225,7 +236,66 @@ class SettingsController {
         return { success: false, error: error.message }
       }
     })
+
+    ipcMain.handle('get-vector-search-status', async () => {
+      try {
+        const status = await VectorSearchService.getStatus()
+        return { success: true, data: status }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
+
+    ipcMain.handle('test-vector-db-connection', async (_, config: unknown) => {
+      try {
+        const data = await VectorSearchService.testConnection(config as Partial<VectorSearchSettings>)
+        return { success: true, data }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
+
+    ipcMain.handle('save-vector-search-settings', async (_, settings: Partial<VectorSearchSettings>) => {
+      try {
+        const data = VectorSearchService.saveSettings(settings)
+        return { success: true, data }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
+
+    ipcMain.handle('reindex-candidate-vectors', async () => {
+      try {
+        const data = await VectorSearchService.reindexAll()
+        return { success: true, data }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
+
+    ipcMain.handle('get-embedding-models', async (_, provider: EmbeddingProviderName) => {
+      try {
+        const data = await VectorSearchService.getEmbeddingModels(provider)
+        return { success: true, data }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
   }
 }
 
 export const settingsController = new SettingsController()
+
+interface EncryptedKeyRow {
+  encrypted_key: string
+  iv: string
+  auth_tag: string
+}
+
+interface OpenRouterModelListResponse {
+  data?: { id: string; name?: string }[]
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
