@@ -1,4 +1,6 @@
 import { ipcMain } from 'electron'
+import OpenAI from 'openai'
+import { GoogleGenAI } from '@google/genai'
 import db from '../db'
 import { KeyStoreService } from '../services/KeyStoreService'
 import { documentQueue } from '../services/DocumentQueueService'
@@ -192,6 +194,69 @@ class SettingsController {
           db.transaction(() => {
             for (const m of data.data) {
               insert.run(provider, m.id, m.name)
+            }
+          })()
+          return { success: true }
+        }
+
+        if (provider === 'openai') {
+          if (KeyStoreService.isLocked()) {
+            return { success: false, error: 'Keystore is locked' }
+          }
+
+          const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as any
+          if (!row) {
+            return { success: false, error: 'OpenAI API key not configured. Please save it before fetching models.' }
+          }
+
+          const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
+          const client = new OpenAI({ apiKey })
+          const models: Array<{ id: string }> = []
+          for await (const model of client.models.list()) {
+            models.push(model)
+          }
+
+          const insert = db.prepare(`
+            INSERT INTO ai_models (provider, model_id, name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name
+          `)
+          db.transaction(() => {
+            for (const model of models) {
+              insert.run(provider, model.id, model.id)
+            }
+          })()
+          return { success: true }
+        }
+
+        if (provider === 'gemini') {
+          if (KeyStoreService.isLocked()) {
+            return { success: false, error: 'Keystore is locked' }
+          }
+
+          const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as any
+          if (!row) {
+            return { success: false, error: 'Gemini API key not configured. Please save it before fetching models.' }
+          }
+
+          const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
+          const client = new GoogleGenAI({ apiKey })
+          const models: Array<{ name: string, displayName?: string }> = []
+          const pager = await client.models.list()
+          for await (const model of pager) {
+            if (model.name && model.supportedActions?.includes('generateContent')) {
+              models.push({ name: model.name, displayName: model.displayName })
+            }
+          }
+
+          const insert = db.prepare(`
+            INSERT INTO ai_models (provider, model_id, name)
+            VALUES (?, ?, ?)
+            ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name
+          `)
+          db.transaction(() => {
+            for (const model of models) {
+              insert.run(provider, model.name, model.displayName || model.name)
             }
           })()
           return { success: true }
