@@ -2,6 +2,8 @@ import db from '../db'
 import { IAIProvider } from './ai/IAIProvider'
 import { OpenRouterProvider } from './ai/OpenRouterProvider'
 import { AnthropicProvider } from './ai/AnthropicProvider'
+import { OpenAIProvider } from './ai/OpenAIProvider'
+import { GeminiProvider } from './ai/GeminiProvider'
 
 export class AIProcessingService {
   /**
@@ -47,6 +49,12 @@ ${rawText}
     switch (_provider.toLowerCase()) {
       case 'anthropic':
         strategy = new AnthropicProvider()
+        break
+      case 'openai':
+        strategy = new OpenAIProvider()
+        break
+      case 'gemini':
+        strategy = new GeminiProvider()
         break
       case 'openrouter':
       default:
