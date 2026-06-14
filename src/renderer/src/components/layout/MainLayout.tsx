@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Home, Users, Settings, ChevronLeft, ChevronRight, Loader2, UploadCloud } from 'lucide-react'
+import { Home, Users, Settings, ChevronLeft, ChevronRight, Loader2, UploadCloud, Search } from 'lucide-react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Label } from '../ui/label'
 import { useTaskQueue } from '../../contexts/TaskQueueContext'
@@ -27,6 +27,7 @@ export function MainLayout({ children }: MainLayoutProps) {
 
   const tabs = [
     { id: 'home', path: '/', label: 'Home', icon: Home },
+    { id: 'search', path: '/search', label: 'Search', icon: Search },
     { id: 'cv-list', path: '/cv-list', label: 'Candidates', icon: Users },
     { id: 'settings', path: '/settings', label: 'Settings', icon: Settings }
   ] as const
@@ -95,11 +96,13 @@ export function MainLayout({ children }: MainLayoutProps) {
             <div>
               <Label className="text-3xl">
                 {location.pathname === '/' && 'Dashboard'}
+                {location.pathname === '/search' && 'Search'}
                 {location.pathname === '/cv-list' && 'Candidates'}
                 {location.pathname === '/settings' && 'Settings'}
               </Label>
               <p className="text-muted-foreground">
                 {location.pathname === '/' && 'Process and extract data from CVs.'}
+                {location.pathname === '/search' && 'Match job descriptions against exact tags and optional semantic vectors.'}
                 {location.pathname === '/cv-list' && 'Manage and search through processed CVs.'}
                 {location.pathname === '/settings' && 'Manage your application preferences and AI integrations.'}
               </p>

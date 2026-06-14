@@ -1,6 +1,9 @@
 import { ipcMain, dialog } from 'electron'
 import db from '../db'
 import { NotionSyncService } from '../services/NotionSyncService'
+import { CandidateSearchService } from '../services/CandidateSearchService'
+import { CandidateSearchFilter } from '../services/CandidateSearchService'
+import { VectorSearchService } from '../services/VectorSearchService'
 import { parse } from 'json2csv'
 import fs from 'fs'
 
@@ -189,12 +192,62 @@ class CandidateController {
 
     ipcMain.handle('delete-candidate', async (_, id: number) => {
       try {
+        try {
+          await VectorSearchService.deleteCandidate(id)
+        } catch (error) {
+          console.warn('[CandidateController] Failed to delete candidate vectors:', error)
+        }
         db.prepare('DELETE FROM notion_sync_history WHERE candidate_id = ?').run(id)
         db.prepare('DELETE FROM candidates WHERE id = ?').run(id)
         return { success: true }
       } catch (error: any) {
         console.error('[CandidateController] Error deleting candidate:', error)
         return { success: false, error: error.message }
+      }
+    })
+
+    ipcMain.handle('search-candidates-for-job-description', async (_, params: {
+      jobDescription: string
+      filters?: CandidateSearchFilter[]
+      limit?: number
+    }) => {
+      try {
+        const result = await CandidateSearchService.search(params)
+        if (result.success && params.jobDescription.trim()) {
+          db.prepare(`
+            INSERT INTO job_search_history (job_description, filters, result_count, semantic_available)
+            VALUES (?, ?, ?, ?)
+          `).run(
+            params.jobDescription.trim(),
+            JSON.stringify(params.filters || []),
+            result.data.results.length,
+            result.data.semantic.available ? 1 : 0
+          )
+        }
+        return result
+      } catch (error: unknown) {
+        console.error('[CandidateController] Error searching candidates for JD:', error)
+        return { success: false, error: getErrorMessage(error) }
+      }
+    })
+
+    ipcMain.handle('get-job-search-history', async (_, limit = 20) => {
+      try {
+        const rows = db.prepare(`
+          SELECT * FROM job_search_history
+          ORDER BY created_at DESC
+          LIMIT ?
+        `).all(limit) as JobSearchHistoryRow[]
+        return {
+          success: true,
+          data: rows.map((row) => ({
+            ...row,
+            filters: JSON.parse(row.filters || '[]'),
+            semantic_available: Boolean(row.semantic_available)
+          }))
+        }
+      } catch (error: unknown) {
+        return { success: false, error: getErrorMessage(error) }
       }
     })
 
@@ -251,3 +304,16 @@ class CandidateController {
 }
 
 export const candidateController = new CandidateController()
+
+interface JobSearchHistoryRow {
+  id: number
+  job_description: string
+  filters: string
+  result_count: number
+  semantic_available: number
+  created_at: string
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}

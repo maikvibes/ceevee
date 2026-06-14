@@ -3,6 +3,7 @@ import { HashRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { MainLayout } from './components/layout/MainLayout'
 import { HomeView } from './views/HomeView'
 import { CVListView } from './views/CVListView'
+import { SearchView } from './views/SearchView'
 import { SettingsView } from './views/SettingsView'
 import { Toaster } from '@/components/ui/sonner'
 import { toast } from 'sonner'
@@ -34,6 +35,7 @@ function App() {
           <MainLayout>
             <Routes>
               <Route path="/" element={<HomeView />} />
+              <Route path="/search" element={<SearchView />} />
               <Route path="/cv-list" element={<CVListView />} />
               <Route path="/settings" element={<SettingsView />} />
               <Route path="*" element={<Navigate to="/" replace />} />
