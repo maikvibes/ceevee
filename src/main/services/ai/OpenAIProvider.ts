@@ -3,11 +3,11 @@ import { IAIProvider } from './IAIProvider'
 import * as fs from 'fs'
 
 export class OpenAIProvider implements IAIProvider {
-  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string): Promise<string> {
+  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
     const normalizedKey = apiKey.trim().replace(/^Bearer\s+/i, '')
     if (!normalizedKey) throw new Error('OpenAI API key is missing.')
 
-    const client = new OpenAI({ apiKey: normalizedKey })
+    const client = new OpenAI({ apiKey: normalizedKey, baseURL: baseUrl || undefined })
 
     let content: any = prompt
     if (filePath && fs.existsSync(filePath)) {

@@ -6,5 +6,5 @@ export interface IAIProvider {
    * @param model The model to use for the completion
    * @returns The string content of the AI's response
    */
-  generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string): Promise<string>;
+  generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string>;
 }

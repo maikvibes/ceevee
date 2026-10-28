@@ -9,7 +9,7 @@ export class AIProcessingService {
   /**
    * Prompts the AI to extract candidate data into structured markdown.
    */
-  static async extractCandidateData(rawText: string, _provider: string, _apiKey: string, _model: string, filePath?: string): Promise<any> {
+  static async extractCandidateData(rawText: string, _provider: string, _apiKey: string, _model: string, filePath?: string, baseUrl?: string): Promise<any> {
     const customTagsRecords = db.prepare('SELECT name FROM custom_tags WHERE category = ?').all('Skill') as { name: string }[]
     const allowedTagsStr = customTagsRecords.map(t => t.name).join(', ')
 
@@ -63,7 +63,7 @@ ${rawText}
     }
 
     try {
-      const aiResponseText = await strategy.generateCompletion(_prompt, _apiKey, _model, filePath)
+      const aiResponseText = await strategy.generateCompletion(_prompt, _apiKey, _model, filePath, baseUrl)
 
       if (aiResponseText.includes('REJECT: NOT_A_CV')) {
         throw new Error('Document rejected: Not a valid CV or Resume.')

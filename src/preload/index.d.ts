@@ -122,6 +122,7 @@ declare global {
         provider: string,
         key: string,
         model: string,
+        baseUrl?: string,
       ) => Promise<{ success: boolean; error?: string }>;
       getApiKey: (provider: string) => Promise<{ success: boolean; data?: string; error?: string }>;
       getSavedProviderSettings: (

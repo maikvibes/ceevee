@@ -106,6 +106,7 @@ export function SettingsView() {
   const { theme, setTheme, colorTheme, setColorTheme, customStyle, setCustomStyle } = useTheme()
   const [provider, setProvider] = useState(() => localStorage.getItem('active_ai_provider') || 'openrouter')
   const [apiKey, setApiKey] = useState('')
+  const [baseUrl, setBaseUrl] = useState('')
   const [models, setModels] = useState<any[]>([])
   const [selectedModel, setSelectedModel] = useState('')
   const [isLoadingModels, setIsLoadingModels] = useState(false)
@@ -291,8 +292,10 @@ export function SettingsView() {
     const settingsRes = await window.api.getSavedProviderSettings(provider)
     if (settingsRes.success && settingsRes.data) {
       setSelectedModel(settingsRes.data.model || '')
+      setBaseUrl(settingsRes.data.baseUrl || '')
     } else {
       setSelectedModel('')
+      setBaseUrl('')
     }
     setIsLoadingModels(false)
   }
@@ -325,8 +328,9 @@ export function SettingsView() {
       setSaveStatus('Key cannot be empty')
       return
     }
-    const res = await window.api.saveApiKey(provider, apiKey.trim(), selectedModel)
+    const res = await window.api.saveApiKey(provider, apiKey.trim(), selectedModel, provider === 'openrouter' ? undefined : baseUrl)
     if (res.success) {
+      await loadProviderSettings()
       setSaveStatus('Saved securely!')
     } else {
       setSaveStatus(`Error: ${res.error}`)
@@ -606,6 +610,14 @@ export function SettingsView() {
               />
             </div>
           </SettingsNestedRow>
+          {provider !== 'openrouter' && (
+            <SettingsNestedRow label="Base URL">
+              <div className="flex flex-col gap-1 w-72">
+                <Input aria-label="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'} />
+                <span className="text-xs text-muted-foreground">Optional. Save before fetching models. Gemini adds its API version automatically.</span>
+              </div>
+            </SettingsNestedRow>
+          )}
           <SettingsNestedRow label="AI Model" alignTop>
             <div className="flex flex-col gap-3">
               <div className="flex items-center gap-2">
@@ -691,6 +703,7 @@ export function SettingsView() {
                 </Button>
               </div>
 
+              <Input aria-label="Model ID" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} placeholder="Or enter a model ID" className="w-[280px]" />
               <div className="flex items-center gap-4 mt-2">
                 <Button onClick={handleSaveApiKey} variant="secondary">Save Provider Configuration</Button>
                 {saveStatus && <span className="text-sm text-muted-foreground">{saveStatus}</span>}

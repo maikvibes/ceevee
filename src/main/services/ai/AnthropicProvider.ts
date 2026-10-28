@@ -2,7 +2,7 @@ import { IAIProvider } from './IAIProvider'
 import * as fs from 'fs'
 
 export class AnthropicProvider implements IAIProvider {
-  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string): Promise<string> {
+  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
     if (!apiKey) throw new Error('Anthropic API key is missing.')
 
     const headers: Record<string, string> = {
@@ -50,7 +50,7 @@ export class AnthropicProvider implements IAIProvider {
       }
     }
 
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${(baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/, '')}/messages`, {
       method: 'POST',
       headers,
       body: JSON.stringify({

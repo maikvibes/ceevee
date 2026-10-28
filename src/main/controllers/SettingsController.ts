@@ -112,26 +112,40 @@ class SettingsController {
       }
     })
 
-    ipcMain.handle('save-api-key', async (_, params: { provider: string, key: string, model: string }) => {
+    ipcMain.handle('save-api-key', async (_, params: { provider: string, key: string, model: string, baseUrl?: string }) => {
       try {
         if (KeyStoreService.isLocked()) {
           return { success: false, error: 'Keystore is locked' }
         }
 
+        const baseUrl = params.baseUrl?.trim() || ''
+        if (baseUrl) {
+          const url = new URL(baseUrl)
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            throw new Error('Base URL must be an HTTP(S) URL without credentials, query, or fragment.')
+          }
+        }
+        const previous = db.prepare('SELECT base_url FROM api_key_store WHERE provider = ?').get(params.provider) as { base_url?: string } | undefined
         const { encryptedKey, iv, authTag } = KeyStoreService.encrypt(params.key.trim().replace(/^Bearer\s+/i, ''))
         
         const stmt = db.prepare(`
-          INSERT INTO api_key_store (provider, encrypted_key, iv, auth_tag, model, updated_at) 
-          VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+          INSERT INTO api_key_store (provider, encrypted_key, iv, auth_tag, model, base_url, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
           ON CONFLICT(provider) DO UPDATE SET 
             encrypted_key = excluded.encrypted_key,
             iv = excluded.iv,
             auth_tag = excluded.auth_tag,
             model = excluded.model,
+            base_url = excluded.base_url,
             updated_at = CURRENT_TIMESTAMP
         `)
         
-        stmt.run(params.provider, encryptedKey, iv, authTag, params.model)
+        db.transaction(() => {
+          stmt.run(params.provider, encryptedKey, iv, authTag, params.model, params.baseUrl === undefined ? previous?.base_url || '' : baseUrl)
+          if (params.baseUrl !== undefined && (previous?.base_url || '') !== baseUrl) {
+            db.prepare('DELETE FROM ai_models WHERE provider = ?').run(params.provider)
+          }
+        })()
         return { success: true }
       } catch (error: any) {
         return { success: false, error: error.message }
@@ -140,9 +154,9 @@ class SettingsController {
 
     ipcMain.handle('get-saved-provider-settings', async (_, provider: string) => {
       try {
-        const row = db.prepare('SELECT model FROM api_key_store WHERE provider = ?').get(provider) as any
+        const row = db.prepare('SELECT model, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
         // We don't return the key, only non-sensitive config
-        return { success: true, data: { model: row?.model || '' } }
+        return { success: true, data: { model: row?.model || '', baseUrl: row?.base_url || '' } }
       } catch (error: any) {
         return { success: false, error: error.message }
       }
@@ -153,7 +167,7 @@ class SettingsController {
         if (KeyStoreService.isLocked()) {
           return { success: false, error: 'Keystore is locked' }
         }
-        const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as any
+        const row = db.prepare('SELECT encrypted_key, iv, auth_tag, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
         if (!row) return { success: true, data: '' }
         
         const decryptedKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
@@ -175,16 +189,24 @@ class SettingsController {
     ipcMain.handle('fetch-models', async (_, provider: string) => {
       try {
         if (provider === 'anthropic') {
-          // Anthropic doesn't have an endpoint, seed manually
-          const standardModels = [
-            { id: 'claude-3-5-sonnet-20240620', name: 'Claude 3.5 Sonnet' },
-            { id: 'claude-3-haiku-20240307', name: 'Claude 3 Haiku' },
-            { id: 'claude-3-opus-20240229', name: 'Claude 3 Opus' }
-          ]
-          const insert = db.prepare('INSERT OR IGNORE INTO ai_models (provider, model_id, name) VALUES (?, ?, ?)')
-          db.transaction(() => {
-            for (const m of standardModels) insert.run(provider, m.id, m.name)
-          })()
+          if (KeyStoreService.isLocked()) throw new Error('Keystore is locked')
+          const row = db.prepare('SELECT encrypted_key, iv, auth_tag, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
+          if (!row) throw new Error('Save an Anthropic API key before fetching models.')
+          const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
+          const url = new URL(`${(row.base_url || 'https://api.anthropic.com/v1').replace(/\/+$/, '')}/models`)
+          const models: Array<{ id: string; display_name?: string }> = []
+          let afterId: string | undefined
+          do {
+            if (afterId) url.searchParams.set('after_id', afterId)
+            const response = await fetch(url, { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } })
+            if (!response.ok) throw new Error(`Anthropic model list failed (${response.status}).`)
+            const page = await response.json() as { data: Array<{ id: string; display_name?: string }>; has_more?: boolean; last_id?: string }
+            models.push(...page.data)
+            if (page.has_more && (!page.last_id || page.last_id === afterId)) throw new Error('Invalid Anthropic model pagination response.')
+            afterId = page.has_more ? page.last_id : undefined
+          } while (afterId)
+          const insert = db.prepare('INSERT INTO ai_models (provider, model_id, name) VALUES (?, ?, ?) ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name')
+          db.transaction(() => { for (const model of models) insert.run(provider, model.id, model.display_name || model.id) })()
           return { success: true }
         }
 
@@ -215,13 +237,13 @@ class SettingsController {
             return { success: false, error: 'Keystore is locked' }
           }
 
-          const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as any
+          const row = db.prepare('SELECT encrypted_key, iv, auth_tag, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
           if (!row) {
             return { success: false, error: 'OpenAI API key not configured. Please save it before fetching models.' }
           }
 
           const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
-          const client = new OpenAI({ apiKey })
+          const client = new OpenAI({ apiKey, baseURL: row.base_url || undefined })
           const models: Array<{ id: string }> = []
           for await (const model of client.models.list()) {
             models.push(model)
@@ -245,13 +267,13 @@ class SettingsController {
             return { success: false, error: 'Keystore is locked' }
           }
 
-          const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(provider) as any
+          const row = db.prepare('SELECT encrypted_key, iv, auth_tag, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
           if (!row) {
             return { success: false, error: 'Gemini API key not configured. Please save it before fetching models.' }
           }
 
           const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
-          const client = new GoogleGenAI({ apiKey })
+          const client = new GoogleGenAI({ apiKey, ...(row.base_url ? { httpOptions: { baseUrl: row.base_url } } : {}) })
           const models: Array<{ name: string, displayName?: string }> = []
           const pager = await client.models.list()
           for await (const model of pager) {

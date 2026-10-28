@@ -101,6 +101,7 @@ export class DocumentQueueService {
         
         if (ocrKeyRow) {
           const decryptedOcrKey = KeyStoreService.decrypt(ocrKeyRow.encrypted_key, ocrKeyRow.iv, ocrKeyRow.auth_tag)
+          const ocrEndpoint = db.prepare('SELECT base_url FROM api_key_store WHERE provider = ?').get(ocrProvider) as { base_url?: string } | undefined
           const ocrModel = ocrModelRow?.setting_value || 'gemini-1.5-flash'
           
           try {
@@ -109,7 +110,8 @@ export class DocumentQueueService {
               ocrProvider,
               decryptedOcrKey,
               ocrModel,
-              filePath
+              filePath,
+              ocrEndpoint?.base_url || undefined
             )
             rawText = `[Extracted via Multimodal LLM OCR (${ocrProvider} / ${ocrModel})]`
           } catch (ocrErr: any) {
@@ -128,13 +130,13 @@ export class DocumentQueueService {
     if (!extractedData) {
       this.updateTaskStatus(taskId, 'Analyzing', filePath)
       const activeProvider = provider || 'openrouter' // Default fallback
-      const keyRow = db.prepare('SELECT encrypted_key, iv, auth_tag, model FROM api_key_store WHERE provider = ?').get(activeProvider) as any
+      const keyRow = db.prepare('SELECT encrypted_key, iv, auth_tag, model, base_url FROM api_key_store WHERE provider = ?').get(activeProvider) as any
       if (!keyRow) {
         throw new Error(`API Key for ${activeProvider} not configured. Please add it in settings.`)
       }
 
       const decryptedKey = KeyStoreService.decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag)
-      extractedData = await AIProcessingService.extractCandidateData(rawText, activeProvider, decryptedKey, keyRow.model)
+      extractedData = await AIProcessingService.extractCandidateData(rawText, activeProvider, decryptedKey, keyRow.model, undefined, keyRow.base_url || undefined)
     }
 
     // 3. Save to Candidates Table

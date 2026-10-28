@@ -70,6 +70,7 @@ db.exec(`
     iv TEXT NOT NULL,
     auth_tag TEXT NOT NULL,
     model TEXT,
+    base_url TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
   );
 
@@ -110,6 +111,12 @@ db.transaction(() => {
 })()
 
 // Migration for existing databases
+try {
+  db.exec('ALTER TABLE api_key_store ADD COLUMN base_url TEXT;')
+} catch (e: any) {
+  if (!e.message.includes('duplicate column name')) throw e
+}
+
 try {
   db.exec('ALTER TABLE api_key_store ADD COLUMN model TEXT;')
 } catch (e: any) {

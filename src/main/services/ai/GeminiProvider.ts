@@ -3,11 +3,11 @@ import { GoogleGenAI } from '@google/genai'
 import { IAIProvider } from './IAIProvider'
 
 export class GeminiProvider implements IAIProvider {
-  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string): Promise<string> {
+  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
     const normalizedKey = apiKey.trim()
     if (!normalizedKey) throw new Error('Gemini API key is missing.')
 
-    const client = new GoogleGenAI({ apiKey: normalizedKey })
+    const client = new GoogleGenAI({ apiKey: normalizedKey, ...(baseUrl ? { httpOptions: { baseUrl } } : {}) })
 
     const contents: any[] = [prompt]
     if (filePath && fs.existsSync(filePath)) {
