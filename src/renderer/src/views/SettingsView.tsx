@@ -118,7 +118,6 @@ export function SettingsView() {
 
   const [ocrProvider, setOcrProvider] = useState('none')
   const [ocrApiKey, setOcrApiKey] = useState('')
-  const [ocrModel, setOcrModel] = useState('')
   const [ocrSaveStatus, setOcrSaveStatus] = useState('')
 
   const filteredModels = useMemo(() => {
@@ -173,9 +172,6 @@ export function SettingsView() {
     })
     window.api.getAppSetting('ocr_provider').then((res: any) => {
       if (res.success && res.value) setOcrProvider(res.value)
-    })
-    window.api.getAppSetting('ocr_model').then((res: any) => {
-      if (res.success && res.value) setOcrModel(res.value)
     })
     loadTags()
     loadVectorStatus()
@@ -347,14 +343,13 @@ export function SettingsView() {
     }
 
     const resProvider = await window.api.setAppSetting('ocr_provider', ocrProvider)
-    const resModel = await window.api.setAppSetting('ocr_model', ocrModel)
     
     let resKey = { success: true }
     if (ocrApiKey.trim()) {
-      resKey = await window.api.saveApiKey('ocr', ocrApiKey.trim(), ocrModel)
+      resKey = await window.api.saveApiKey('ocr', ocrApiKey.trim(), '')
     }
 
-    if (resProvider.success && resModel.success && resKey.success) {
+    if (resProvider.success && resKey.success) {
       setOcrSaveStatus('Saved successfully!')
       toast.success('OCR Configuration saved!')
     } else {
@@ -741,12 +736,7 @@ export function SettingsView() {
               </SettingsNestedRow>
               <SettingsNestedRow label="OCR Model" alignTop>
                 <div className="flex flex-col gap-3">
-                  <Input
-                    value={ocrModel}
-                    onChange={(e) => setOcrModel(e.target.value)}
-                    placeholder="e.g. gemini-1.5-flash or gpt-4o-mini"
-                    className="w-[280px]"
-                  />
+                  <span className="text-sm text-muted-foreground">OCR uses the model saved for the selected provider in AI Provider Settings. Choose a model that supports document or image input.</span>
                   <div className="flex items-center gap-4 mt-2">
                     <Button onClick={handleSaveOcrSettings} variant="secondary">Save OCR Configuration</Button>
                     {ocrSaveStatus && <span className="text-sm text-muted-foreground">{ocrSaveStatus}</span>}

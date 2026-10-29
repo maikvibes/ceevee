@@ -2,6 +2,8 @@ import * as fs from 'fs'
 import { GoogleGenAI } from '@google/genai'
 import { IAIProvider } from './IAIProvider'
 
+export const DEFAULT_GEMINI_MODEL = 'gemini-3.5-flash-lite'
+
 export class GeminiProvider implements IAIProvider {
   async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
     const normalizedKey = apiKey.trim()
@@ -29,9 +31,11 @@ export class GeminiProvider implements IAIProvider {
       })
     }
 
+    const modelId = model.trim() || DEFAULT_GEMINI_MODEL
+
     try {
       const response = await client.models.generateContent({
-        model: model || 'gemini-1.5-flash',
+        model: modelId,
         contents,
         config: {
           temperature: 0.1
@@ -40,8 +44,11 @@ export class GeminiProvider implements IAIProvider {
 
       return response.text || ''
     } catch (error: any) {
-      const message = error?.error?.message || error?.message || String(error)
       const status = error?.status ? ` (${error.status})` : ''
+      if (Number(error?.status) === 404) {
+        throw new Error(`Gemini API error${status}: Model "${modelId}" or its endpoint was not found. Check the OCR model and Gemini base URL in Settings, and choose a model available to your API key.`)
+      }
+      const message = error?.error?.message || error?.message || String(error)
       throw new Error(`Gemini API error${status}: ${message}`)
     }
   }

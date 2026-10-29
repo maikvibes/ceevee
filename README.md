@@ -59,7 +59,7 @@ npm run build
 
 Once the app is running, navigate to the **Settings** view (the gear icon):
 
-1. **AI Provider Setup:** Select your preferred AI provider and enter your API Key and model ID. For OpenAI, Anthropic, or Gemini compatible services, optionally set a Base URL and save before fetching models. OpenAI and Anthropic base URLs should include the API version (typically `/v1`); Gemini base URLs omit the version because the SDK adds it. Enter a model ID manually if the service does not support model listing. These URLs apply to CV processing and OCR; embedding providers use their standard endpoints.
+1. **AI Provider Setup:** Select your preferred AI provider and enter your API Key and model ID. For OpenAI, Anthropic, or Gemini compatible services, optionally set a Base URL and save before fetching models. OpenAI and Anthropic base URLs should include the API version (typically `/v1`); Gemini base URLs omit the version because the SDK adds it. Enter a model ID manually if the service does not support model listing. These URLs apply to CV processing and OCR; embedding providers use their standard endpoints. OCR uses the model configured for its selected provider; choose a model that supports document or image input.
 2. **Notion Setup (Optional):** Enter your Notion Integration Token and your target Notion Database ID. Ensure your Notion integration is invited to the target database.
 3. **Appearance:** Select a custom theme or paste your own `tweakcn` CSS string to personalize the interface.
 

@@ -97,12 +97,12 @@ export class DocumentQueueService {
         this.updateTaskStatus(taskId, 'LLM OCR...', filePath)
         
         const ocrKeyRow = db.prepare("SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = 'ocr'").get() as any
-        const ocrModelRow = db.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'ocr_model'").get() as any
         
         if (ocrKeyRow) {
           const decryptedOcrKey = KeyStoreService.decrypt(ocrKeyRow.encrypted_key, ocrKeyRow.iv, ocrKeyRow.auth_tag)
-          const ocrEndpoint = db.prepare('SELECT base_url FROM api_key_store WHERE provider = ?').get(ocrProvider) as { base_url?: string } | undefined
-          const ocrModel = ocrModelRow?.setting_value || 'gemini-1.5-flash'
+          const ocrSettings = db.prepare('SELECT model, base_url FROM api_key_store WHERE provider = ?').get(ocrProvider) as { model?: string; base_url?: string } | undefined
+          const ocrModel = ocrSettings?.model?.trim()
+          if (!ocrModel) throw new Error(`Select and save a model for ${ocrProvider} in AI Provider Settings before using OCR.`)
           
           try {
             extractedData = await AIProcessingService.extractCandidateData(
@@ -111,7 +111,7 @@ export class DocumentQueueService {
               decryptedOcrKey,
               ocrModel,
               filePath,
-              ocrEndpoint?.base_url || undefined
+              ocrSettings?.base_url || undefined
             )
             rawText = `[Extracted via Multimodal LLM OCR (${ocrProvider} / ${ocrModel})]`
           } catch (ocrErr: any) {

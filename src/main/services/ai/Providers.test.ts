@@ -3,9 +3,10 @@ import { AnthropicProvider } from './AnthropicProvider'
 import { OpenAIProvider } from './OpenAIProvider'
 import { GeminiProvider } from './GeminiProvider'
 
-const { openAIOptions, geminiOptions } = vi.hoisted(() => ({
+const { openAIOptions, geminiOptions, geminiGenerate } = vi.hoisted(() => ({
   openAIOptions: vi.fn(),
-  geminiOptions: vi.fn()
+  geminiOptions: vi.fn(),
+  geminiGenerate: vi.fn(async () => ({ text: 'gemini' }))
 }))
 vi.mock('openai', () => ({
   default: class {
@@ -15,12 +16,12 @@ vi.mock('openai', () => ({
 }))
 vi.mock('@google/genai', () => ({
   GoogleGenAI: class {
-    models = { generateContent: async () => ({ text: 'gemini' }) }
+    models = { generateContent: geminiGenerate }
     constructor(options: unknown) { geminiOptions(options) }
   }
 }))
 
-afterEach(() => { vi.restoreAllMocks(); openAIOptions.mockClear(); geminiOptions.mockClear() })
+afterEach(() => { vi.restoreAllMocks(); openAIOptions.mockClear(); geminiOptions.mockClear(); geminiGenerate.mockReset(); geminiGenerate.mockResolvedValue({ text: 'gemini' }) })
 
 describe('custom AI endpoints', () => {
   it('passes a custom OpenAI URL to the SDK and leaves the default unset', async () => {
@@ -37,6 +38,17 @@ describe('custom AI endpoints', () => {
     expect(geminiOptions).toHaveBeenLastCalledWith({ apiKey: 'key', httpOptions: { baseUrl: 'http://localhost:1234' } })
     await provider.generateCompletion('prompt', 'key', 'model')
     expect(geminiOptions).toHaveBeenLastCalledWith({ apiKey: 'key' })
+  })
+
+  it('uses an available Gemini default when the OCR model is blank', async () => {
+    await new GeminiProvider().generateCompletion('prompt', 'key', '  ')
+    expect(geminiGenerate).toHaveBeenCalledWith(expect.objectContaining({ model: 'gemini-3.5-flash-lite' }))
+  })
+
+  it('explains Gemini 404 errors without hiding the configured model', async () => {
+    geminiGenerate.mockRejectedValueOnce({ status: 404, message: '{"error":{"message":"","code":404}}' })
+    await expect(new GeminiProvider().generateCompletion('prompt', 'key', 'my-model', undefined, 'http://localhost'))
+      .rejects.toThrow('Model "my-model" or its endpoint was not found')
   })
 
   it('sends Anthropic messages to the configured URL without a duplicate slash', async () => {
