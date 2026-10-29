@@ -1,18 +1,23 @@
 import OpenAI from 'openai'
 import { IAIProvider } from './IAIProvider'
 import * as fs from 'fs'
+import * as path from 'path'
+import { openAIClientOptions } from './providerOptions'
 
 export class OpenAIProvider implements IAIProvider {
   async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
     const normalizedKey = apiKey.trim().replace(/^Bearer\s+/i, '')
-    if (!normalizedKey) throw new Error('OpenAI API key is missing.')
+    if (!normalizedKey && !baseUrl) throw new Error('OpenAI API key is missing.')
 
-    const client = new OpenAI({ apiKey: normalizedKey, baseURL: baseUrl || undefined })
+    const client = new OpenAI(openAIClientOptions(normalizedKey, baseUrl))
 
     let content: any = prompt
     if (filePath && fs.existsSync(filePath)) {
       const ext = filePath.split('.').pop()?.toLowerCase()
-      if (['png', 'jpg', 'jpeg', 'webp'].includes(ext || '')) {
+      if (ext === 'pdf') {
+        const data = fs.readFileSync(filePath).toString('base64')
+        content = [{ type: 'text', text: prompt }, { type: 'file', file: { filename: path.basename(filePath), file_data: `data:application/pdf;base64,${data}` } }]
+      } else if (['png', 'jpg', 'jpeg', 'webp'].includes(ext || '')) {
         const fileBuffer = fs.readFileSync(filePath)
         const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg'
         content = [
@@ -24,7 +29,11 @@ export class OpenAIProvider implements IAIProvider {
             }
           }
         ]
+      } else {
+        throw new Error('OpenAI OCR supports PDF and image files only.')
       }
+    } else if (filePath) {
+      throw new Error('OCR file could not be found.')
     }
 
     try {

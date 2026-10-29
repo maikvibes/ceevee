@@ -1,7 +1,7 @@
 import { ElectronAPI } from "@electron-toolkit/preload";
 export const pipelineStatus = ["Queued", "Extracting", "Analyzing", "Syncing to Notion", "Uploading CV to Notion", "Attaching CV to Notion Page", "Complete", "Failed"] as const;
 
-type EmbeddingProviderName = "local" | "openai" | "gemini" | "openrouter";
+type EmbeddingProviderName = "local";
 
 interface CandidateSearchFilter {
   id: string;
@@ -10,10 +10,6 @@ interface CandidateSearchFilter {
 
 interface VectorSearchSettings {
   vector_search_enabled: boolean;
-  vector_db_provider: "chromadb";
-  chroma_host: string;
-  chroma_port: number;
-  chroma_ssl: boolean;
   embedding_provider: EmbeddingProviderName;
   embedding_model: string;
   embedding_dimension: number;
@@ -31,8 +27,8 @@ declare global {
         provider: string,
       ) => Promise<{ success: boolean; error?: string }>;
       getDocumentTasks: () => Promise<any[]>;
-      clearDocumentQueue: () => Promise<{ success: boolean; error?: string }>;
-      removeDocumentTask: (taskId: number) => Promise<{ success: boolean; error?: string }>;
+      clearDocumentQueue: () => Promise<{ success: boolean; remainingReviews?: number; warning?: string; error?: string }>
+      removeDocumentTask: (taskId: number) => Promise<{ success: boolean; warning?: string; error?: string }>;
       selectFiles: () => Promise<{ success: boolean; filePaths?: string[]; error?: string }>;
 
       // Window Controls
@@ -59,6 +55,19 @@ declare global {
         limit: number;
       }) => Promise<any>;
       getCandidate: (id: number) => Promise<any>;
+      getCandidateMergeHistory: (candidateId: number) => Promise<{ success: boolean; data?: Array<{ id: number; sourceCandidateId: number; mergedAt: string; firstName: string; lastName: string; email: string; phone: string; headline: string; status: string; notionPageUrl: string | null }>; error?: string }>;
+      getDuplicateCandidates: () => Promise<{ success: boolean; data?: Array<{ first: { id: number; first_name: string; last_name: string; email: string; phone: string }; second: { id: number; first_name: string; last_name: string; email: string; phone: string }; reasons: string[] }>; error?: string }>;
+      mergeCandidates: (targetId: number, sourceId: number) => Promise<{ success: boolean; warning?: string; error?: string }>;
+      getCvVersions: (candidateId: number) => Promise<{ success: boolean; data?: Array<{ id: number; original_filename: string; file_size: number | null; created_at: string; raw_text: string | null; is_current: boolean; available: boolean }>; totalStorage?: number; error?: string }>;
+      readCvVersion: (candidateId: number, versionId: number) => Promise<{ success: boolean; data?: ArrayBuffer; filename?: string; rawText?: string; error?: string }>;
+      resetProfileToCurrentCv: (candidateId: number) => Promise<{ success: boolean; warning?: string; error?: string }>;
+      setCurrentCvVersion: (candidateId: number, versionId: number) => Promise<{ success: boolean; warning?: string; error?: string }>;
+      deleteCvVersion: (candidateId: number, versionId: number) => Promise<{ success: boolean; warning?: string; error?: string }>;
+      getCvStorageUsage: () => Promise<{ success: boolean; totalStorage?: number; error?: string }>;
+      copyExistingCvs: () => Promise<{ success: boolean; data?: { copied: number; unavailable: number; alreadyManaged: number; totalStorage: number }; error?: string }>;
+      retryDocumentTask: (taskId: number) => Promise<{ success: boolean; error?: string }>;
+      getCvMatchReview: (taskId: number) => Promise<{ success: boolean; data?: { filename: string; incoming: { first_name?: string; last_name?: string; email?: string; phone?: string }; candidates: Array<{ id: number; first_name: string; last_name: string; email: string; phone: string }> }; error?: string }>;
+      resolveCvMatchReview: (taskId: number, candidateId: number | null) => Promise<{ success: boolean; candidateId?: number; warning?: string; error?: string }>;
       getCandidateByFilepath: (
         filePath: string,
       ) => Promise<{ success: boolean; id?: number; error?: string }>;
@@ -124,6 +133,7 @@ declare global {
         model: string,
         baseUrl?: string,
       ) => Promise<{ success: boolean; error?: string }>;
+      saveProviderConfig: (provider: string, changes: { key?: string; model?: string; baseUrl?: string }) => Promise<{ success: boolean; error?: string }>;
       getApiKey: (provider: string) => Promise<{ success: boolean; data?: string; error?: string }>;
       getSavedProviderSettings: (
         provider: string,
@@ -154,18 +164,13 @@ declare global {
         success: boolean;
         data?: {
           settings: VectorSearchSettings;
-          chromaReachable: boolean;
           indexedChunks: number;
           candidateCount: number;
+          pending: number;
           message: string;
         };
         error?: string;
       }>;
-      testVectorDbConnection: (config: {
-        chroma_host?: string;
-        chroma_port?: number;
-        chroma_ssl?: boolean;
-      }) => Promise<{ success: boolean; data?: { version: string }; error?: string }>;
       saveVectorSearchSettings: (
         settings: Partial<VectorSearchSettings>,
       ) => Promise<{ success: boolean; data?: VectorSearchSettings; error?: string }>;
@@ -174,10 +179,7 @@ declare global {
         data?: { indexedCandidates: number };
         error?: string;
       }>;
-      getEmbeddingModels: (
-        provider: EmbeddingProviderName,
-      ) => Promise<{ success: boolean; data?: Array<{ model_id: string; name: string }>; error?: string }>;
-      deleteAllData: () => Promise<{ success: boolean; error?: string }>;
+      deleteAllData: () => Promise<{ success: boolean; warning?: string; error?: string }>
       deleteDuplicateCandidates: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       getDistinctLocations: () => Promise<{ success: boolean; data?: string[]; error?: string }>;
       getDashboardStats: () => Promise<{ success: boolean; data?: any; error?: string }>;

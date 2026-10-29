@@ -46,18 +46,19 @@ export class CandidateSearchService {
 
     let semantic = { available: false, reason: 'Semantic search is disabled or not indexed.' as string | null }
     try {
-      const semanticResults = await VectorSearchService.query(jobDescription, params.limit || 25)
+      const semanticResults = await VectorSearchService.query(jobDescription, params.limit || 25, params.filters || [])
       semantic = { available: semanticResults.available, reason: semanticResults.reason }
       if (semanticResults.available) {
         for (const match of semanticResults.results) {
           if (!match.candidateId) continue
           const candidate = scored.get(match.candidateId)?.candidate || this.getCandidate(match.candidateId)
           if (!candidate) continue
+          if ((params.filters || []).some((filter) => filter.value && filter.value !== 'all' && (filter.id === 'status' || filter.id === 'job_type') && candidate[filter.id] !== filter.value)) continue
 
           const existing = scored.get(match.candidateId) || scoreCandidateForJobDescription(candidate, signals)
           const semanticScore = Math.max(0, 1 - Math.min(match.distance, 1))
           existing.semanticScore = Math.max(existing.semanticScore || 0, semanticScore)
-          existing.semanticReasons = [`Semantic CV chunk matched (${Math.round(semanticScore * 100)}%)`]
+          existing.semanticReasons = [`Semantic ${match.metadata.source === 'profile' ? 'profile' : 'CV chunk'} matched (${Math.round(semanticScore * 100)}%)`]
           existing.score = existing.tagScore * 0.65 + existing.semanticScore * 0.35
           scored.set(match.candidateId, existing)
         }
@@ -83,7 +84,8 @@ export class CandidateSearchService {
 
     const terms = [...signals.tags, ...signals.jobTypes, ...signals.keywords.slice(0, 8)]
     if (terms.length > 0) {
-      clauses.push(`(${terms.map(() => '(tags LIKE ? OR job_type LIKE ? OR headline LIKE ? OR raw_text LIKE ?)').join(' OR ')})`)
+      clauses.push(`(id IN (SELECT rowid FROM candidate_search_fts WHERE candidate_search_fts MATCH ?) OR ${terms.map(() => '(tags LIKE ? OR job_type LIKE ? OR headline LIKE ? OR raw_text LIKE ?)').join(' OR ')})`)
+      values.push(terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(' OR '))
       for (const term of terms) {
         const value = `%${term}%`
         values.push(value, value, value, value)

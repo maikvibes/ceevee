@@ -1,379 +1,158 @@
+import { app } from 'electron'
+import { createHash } from 'node:crypto'
+import { join } from 'node:path'
+import { Worker } from 'node:worker_threads'
 import db from '../db'
-import {
-  DEFAULT_EMBEDDING_MODELS,
-  EncryptedKeyRow,
-  EmbeddingProviderName,
-  createEmbeddingProvider,
-  decryptProviderKey
-} from './EmbeddingProvider'
 import { SearchableCandidate } from './CandidateSearchScoring'
 
+const MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2'
+const DIMENSIONS = 384
+type IndexStatus = 'disabled' | 'not_indexed' | 'indexing' | 'indexed' | 'stale' | 'error'
 export interface VectorSearchSettings {
   vector_search_enabled: boolean
-  vector_db_provider: 'chromadb'
-  chroma_host: string
-  chroma_port: number
-  chroma_ssl: boolean
-  embedding_provider: EmbeddingProviderName
+  embedding_provider: 'local'
   embedding_model: string
   embedding_dimension: number
-  embedding_index_status: 'disabled' | 'not_indexed' | 'indexing' | 'indexed' | 'stale' | 'error'
+  embedding_index_status: IndexStatus
 }
+interface ChunkRow { content_hash: string; embedding: Buffer; model: string; dimensions: number }
+interface Candidate extends SearchableCandidate { current_cv_version_id: number | null; summary?: string | null }
+interface Ranked { candidateId: number; document: string; source: string; distance: number }
 
-export interface VectorSearchStatus {
-  settings: VectorSearchSettings
-  chromaReachable: boolean
-  indexedChunks: number
-  candidateCount: number
-  message: string
+class SemanticWorker {
+  private worker: Worker | undefined
+  private nextId = 0
+  private pending = new Map<number, { resolve: (value: any) => void; reject: (reason: Error) => void }>()
+
+  request<T>(payload: object): Promise<T> {
+    if (!this.worker) {
+      const worker = new Worker(join(__dirname, 'semantic-worker.js'), { workerData: { model: MODEL, dtype: 'q8', cacheDir: join(app.getPath('userData'), 'models'), dbPath: join(app.getPath('userData'), 'database.sqlite') } })
+      this.worker = worker
+      worker.on('message', (message: { id: number; result?: unknown; error?: string }) => {
+        const request = this.pending.get(message.id)
+        if (!request) return
+        this.pending.delete(message.id)
+        if (message.error) request.reject(new Error(message.error)); else request.resolve(message.result)
+      })
+      const failed = (error: Error) => {
+        if (this.worker !== worker) return
+        this.worker = undefined
+        for (const request of this.pending.values()) request.reject(error)
+        this.pending.clear()
+      }
+      worker.on('error', failed)
+      worker.on('exit', (code) => failed(new Error(`Local search worker exited (${code}).`)))
+    }
+    const id = ++this.nextId
+    return new Promise<T>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject })
+      this.worker!.postMessage({ id, ...payload })
+    })
+  }
 }
-
-interface AppSettingRow {
-  setting_key: keyof VectorSearchSettings
-  setting_value: string
-}
-
-interface CountRow {
-  count: number
-}
-
-interface VectorSearchMatch {
-  id: string
-  candidateId: number
-  distance: number
-  document: string
-  metadata: ChromaCandidateMetadata
-}
-
-interface VectorQueryResult {
-  available: boolean
-  reason: string | null
-  results: VectorSearchMatch[]
-}
-
-interface ChromaCandidateMetadata extends Record<string, string | number | boolean> {
-  candidate_id: number
-  candidate_name: string
-  email: string
-  phone: string
-  headline: string
-  job_type: string
-  tags: string
-  file_path: string
-  chunk_index: number
-  updated_at: string
-}
-
-interface EmbeddingModelInfo {
-  model_id: string
-  name: string
-}
-
-interface OpenRouterModelListResponse {
-  data?: { id: string; name?: string }[]
-}
-
-const COLLECTION_NAME = 'ceevee_candidates'
-
-const DEFAULT_SETTINGS: VectorSearchSettings = {
-  vector_search_enabled: false,
-  vector_db_provider: 'chromadb',
-  chroma_host: 'localhost',
-  chroma_port: 8000,
-  chroma_ssl: false,
-  embedding_provider: 'local',
-  embedding_model: DEFAULT_EMBEDDING_MODELS.local,
-  embedding_dimension: 384,
-  embedding_index_status: 'disabled'
-}
+const worker = new SemanticWorker()
 
 export class VectorSearchService {
+  private static lastError = ''
+
   static getSettings(): VectorSearchSettings {
-    const rows = db.prepare('SELECT setting_key, setting_value FROM app_settings WHERE setting_key LIKE ? OR setting_key = ?').all('vector_%', 'embedding_index_status') as AppSettingRow[]
-    const settings: VectorSearchSettings = { ...DEFAULT_SETTINGS }
-
-    for (const row of rows) {
-      assignSetting(settings, row.setting_key, row.setting_value)
-    }
-
-    if (!settings.embedding_model) {
-      settings.embedding_model = DEFAULT_EMBEDDING_MODELS[settings.embedding_provider as EmbeddingProviderName]
-    }
-    settings.embedding_index_status = settings.vector_search_enabled
-      ? settings.embedding_index_status === 'disabled' ? 'not_indexed' : settings.embedding_index_status
-      : 'disabled'
-
-    return settings
+    const rows = db.prepare("SELECT setting_key, setting_value FROM app_settings WHERE setting_key IN ('vector_search_enabled', 'embedding_index_status')").all() as { setting_key: string; setting_value: string }[]
+    const values = Object.fromEntries(rows.map((row) => [row.setting_key, row.setting_value]))
+    const enabled = values.vector_search_enabled === 'true'
+    return { vector_search_enabled: enabled, embedding_provider: 'local', embedding_model: MODEL, embedding_dimension: DIMENSIONS,
+      embedding_index_status: enabled ? (values.embedding_index_status || 'not_indexed') as IndexStatus : 'disabled' }
   }
 
-  static saveSettings(next: Partial<VectorSearchSettings>) {
-    const previous = this.getSettings()
-    const merged = {
-      ...previous,
-      ...next,
-      embedding_model: next.embedding_model || DEFAULT_EMBEDDING_MODELS[next.embedding_provider || previous.embedding_provider]
-    }
+  static saveSettings(next: Partial<VectorSearchSettings>): VectorSearchSettings {
+    const enabled = next.vector_search_enabled ?? this.getSettings().vector_search_enabled
+    db.prepare("INSERT OR REPLACE INTO app_settings (setting_key, setting_value) VALUES ('vector_search_enabled', ?)").run(String(enabled))
+    if (enabled && this.getSettings().embedding_index_status === 'disabled') this.setIndexStatus('not_indexed')
+    return this.getSettings()
+  }
 
-    if (
-      previous.embedding_provider !== merged.embedding_provider ||
-      previous.embedding_model !== merged.embedding_model ||
-      previous.embedding_dimension !== merged.embedding_dimension
-    ) {
-      merged.embedding_index_status = merged.vector_search_enabled ? 'stale' : 'disabled'
-    } else if (!merged.vector_search_enabled) {
-      merged.embedding_index_status = 'disabled'
-    } else if (previous.embedding_index_status === 'disabled') {
-      merged.embedding_index_status = 'not_indexed'
-    }
+  static async getStatus() {
+    const settings = this.getSettings()
+    const candidateCount = (db.prepare('SELECT COUNT(*) AS count FROM candidates').get() as { count: number }).count
+    const indexedChunks = (db.prepare('SELECT COUNT(*) AS count FROM semantic_chunks WHERE model = ? AND dimensions = ?').get(MODEL, DIMENSIONS) as { count: number }).count
+    const pending = (db.prepare('SELECT COUNT(*) AS count FROM cv_reindex_jobs').get() as { count: number }).count
+    const message = !settings.vector_search_enabled ? 'Semantic search is paused.' : this.lastError || (pending ? `${settings.embedding_index_status === 'indexing' ? 'Loading the model or indexing. ' : ''}${pending} candidates waiting to index.` : 'Local index is up to date.')
+    return { settings, indexedChunks, candidateCount, pending, message }
+  }
 
-    const stmt = db.prepare(`
-      INSERT INTO app_settings (setting_key, setting_value)
-      VALUES (?, ?)
-      ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
-    `)
-
-    db.transaction(() => {
-      for (const [key, value] of Object.entries(merged)) {
-        stmt.run(key, String(value))
+  static async indexCandidate(candidateId: number, markReady = true, revision?: number): Promise<boolean> {
+    if (!this.getSettings().vector_search_enabled) return false
+    try {
+      const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId) as Candidate | undefined
+      if (!candidate) { await this.deleteCandidate(candidateId); return true }
+      const raw = candidate.raw_text || ''
+      const fromProfile = !raw.trim() || /^\s*\[Document analyzed via /i.test(raw)
+      const source = fromProfile ? 'profile' : 'cv'
+      const text = fromProfile ? [candidate.first_name, candidate.last_name, candidate.headline, candidate.job_type, candidate.summary, candidate.tags].filter(Boolean).join('\n') : raw
+      const chunks = chunkText(text)
+      const previous = db.prepare('SELECT content_hash, embedding, model, dimensions FROM semantic_chunks WHERE candidate_id = ?').all(candidateId) as ChunkRow[]
+      const cached = new Map(previous.filter((row) => row.model === MODEL && row.dimensions === DIMENSIONS).map((row) => [row.content_hash, row.embedding]))
+      const hashes = chunks.map((chunk) => createHash('sha256').update(chunk).digest('hex'))
+      const missing = [...new Set(hashes.filter((hash) => !cached.has(hash)))]
+      if (missing.length) {
+        this.setIndexStatus('indexing')
+        // Small batches bound memory and let the worker accept search requests between candidates.
+        for (let i = 0; i < missing.length; i += 8) {
+          if (!this.getSettings().vector_search_enabled) return false
+          const batch = missing.slice(i, i + 8)
+          const vectors = await worker.request<number[][]>({ type: 'embed', texts: batch.map((hash) => chunks[hashes.indexOf(hash)]) })
+          if (vectors.length !== batch.length || vectors.some((vector) => vector.length !== DIMENSIONS || vector.some((n) => !Number.isFinite(n)))) throw new Error('Local embedding model returned an unexpected vector dimension.')
+          batch.forEach((hash, index) => cached.set(hash, Buffer.from(new Float32Array(vectors[index]).buffer)))
+        }
       }
-    })()
-
-    return merged
-  }
-
-  static async getStatus(): Promise<VectorSearchStatus> {
-    const settings = this.getSettings()
-    const candidateCount = (db.prepare('SELECT COUNT(*) as count FROM candidates WHERE raw_text IS NOT NULL AND raw_text != ?').get('') as CountRow).count
-    if (!settings.vector_search_enabled) {
-      return { settings, chromaReachable: false, indexedChunks: 0, candidateCount, message: 'Semantic search is disabled.' }
-    }
-
-    try {
-      const collection = await this.getCollection(settings)
-      const count = await collection.count()
-      return { settings, chromaReachable: true, indexedChunks: count, candidateCount, message: 'ChromaDB is reachable.' }
-    } catch (error: unknown) {
-      return { settings, chromaReachable: false, indexedChunks: 0, candidateCount, message: getErrorMessage(error) }
-    }
-  }
-
-  static async testConnection(config: Partial<VectorSearchSettings>) {
-    const settings = { ...this.getSettings(), ...config }
-    const client = await this.getClient(settings)
-    const version = await client.version()
-    return { success: true, version }
-  }
-
-  static async indexCandidate(candidateId: number) {
-    const settings = this.getSettings()
-    if (!settings.vector_search_enabled) return
-
-    try {
-      const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId) as SearchableCandidate | undefined
-      if (!candidate?.raw_text) return
-      await this.deleteCandidate(candidateId)
-
-      const chunks = chunkText(candidate.raw_text)
-      if (chunks.length === 0) return
-
-      const provider = await this.createProvider(settings)
-      const embeddings = await provider.embedDocuments(chunks)
-      const collection = await this.getCollection(settings)
-      await collection.upsert({
-        ids: chunks.map((_, index) => `${candidate.id}:${candidate.updated_at || candidate.created_at}:${index}`),
-        documents: chunks,
-        embeddings,
-        metadatas: chunks.map((_, index) => buildMetadata(candidate, index))
-      })
-
-      this.setIndexStatus('indexed')
+      const committed = db.transaction(() => {
+        const current = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId) as Candidate | undefined
+        const job = db.prepare('SELECT revision FROM cv_reindex_jobs WHERE candidate_id = ?').get(candidateId) as { revision: number } | undefined
+        if (!this.getSettings().vector_search_enabled || !current || current.current_cv_version_id !== candidate.current_cv_version_id || current.raw_text !== candidate.raw_text || current.first_name !== candidate.first_name || current.last_name !== candidate.last_name || current.job_type !== candidate.job_type || current.headline !== candidate.headline || current.summary !== candidate.summary || current.tags !== candidate.tags || (revision !== undefined && job?.revision !== revision)) return false
+        db.prepare('DELETE FROM semantic_chunks WHERE candidate_id = ?').run(candidateId)
+        const insert = db.prepare('INSERT INTO semantic_chunks (candidate_id, version_id, chunk_index, content_hash, document, source, model, dimensions, embedding) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        chunks.forEach((chunk, i) => insert.run(candidateId, candidate.current_cv_version_id, i, hashes[i], chunk, source, MODEL, DIMENSIONS, cached.get(hashes[i])))
+        return true
+      })()
+      if (committed && markReady) this.setIndexStatus('indexed')
+      this.lastError = ''
+      return committed
     } catch (error) {
-      console.error('[VectorSearchService] Candidate vector indexing failed:', error)
+      this.lastError = error instanceof Error ? error.message : String(error)
       this.setIndexStatus('error')
+      console.error('[Local search] Indexing failed:', error)
+      return false
     }
   }
 
-  static async deleteCandidate(candidateId: number) {
-    const settings = this.getSettings()
-    if (!settings.vector_search_enabled) return
-    const collection = await this.getCollection(settings)
-    await collection.delete({ where: { candidate_id: candidateId } })
-  }
+  static async deleteCandidate(candidateId: number) { db.prepare('DELETE FROM semantic_chunks WHERE candidate_id = ?').run(candidateId) }
 
   static async reindexAll() {
-    const settings = this.getSettings()
-    if (!settings.vector_search_enabled) throw new Error('Vector search is disabled.')
-
-    this.setIndexStatus('indexing')
-    const collection = await this.getCollection(settings)
-    const candidates = db.prepare('SELECT * FROM candidates WHERE raw_text IS NOT NULL AND raw_text != ?').all('') as SearchableCandidate[]
-    try {
-      await collection.delete({ where: { candidate_id: { $gte: 0 } } })
-    } catch (error) {
-      console.warn('[VectorSearchService] Collection clear skipped:', error)
-    }
-
-    for (const candidate of candidates) {
-      await this.indexCandidate(candidate.id)
-    }
-    this.setIndexStatus('indexed')
-    return { indexedCandidates: candidates.length }
+    if (!this.getSettings().vector_search_enabled) throw new Error('Enable semantic search first.')
+    const result = db.prepare("INSERT INTO cv_reindex_jobs (candidate_id, operation, revision) SELECT id, 'upsert', 1 FROM candidates WHERE 1 ON CONFLICT(candidate_id) DO UPDATE SET operation = 'upsert', revision = revision + 1").run()
+    this.setIndexStatus('stale')
+    this.lastError = ''
+    const { CVVersionService } = await import('./CVVersionService')
+    void CVVersionService.retryIndexes()
+    return { indexedCandidates: result.changes }
   }
 
-  static async query(text: string, limit = 12) {
-    const settings = this.getSettings()
-    if (!settings.vector_search_enabled || settings.embedding_index_status !== 'indexed') {
-      return { available: false, reason: 'Semantic search is disabled or not indexed.', results: [] }
-    }
-
-    const provider = await this.createProvider(settings)
-    const embedding = await provider.embedQuery(text)
-    const collection = await this.getCollection(settings)
-    const results = await collection.query({
-      queryEmbeddings: [embedding],
-      nResults: limit,
-      include: ['metadatas', 'distances', 'documents']
-    })
-
-    const matches = (results.ids?.[0] || []).map((id: string, index: number) => ({
-      id,
-      candidateId: Number((results.metadatas?.[0]?.[index] as Partial<ChromaCandidateMetadata> | undefined)?.candidate_id),
-      distance: results.distances?.[0]?.[index] ?? 1,
-      document: results.documents?.[0]?.[index] || '',
-      metadata: (results.metadatas?.[0]?.[index] || {}) as unknown as ChromaCandidateMetadata
-    }))
-
-    return { available: true, reason: null, results: matches } satisfies VectorQueryResult
+  static async query(text: string, limit = 12, filters: { id: string; value: string | number | boolean | null }[] = []) {
+    if (!this.getSettings().vector_search_enabled) return { available: false, reason: 'Semantic search is disabled.', results: [] }
+    const ready = db.prepare('SELECT 1 FROM semantic_chunks s JOIN candidates c ON c.id = s.candidate_id WHERE s.model = ? AND s.dimensions = ? AND s.version_id IS c.current_cv_version_id AND NOT EXISTS (SELECT 1 FROM cv_reindex_jobs j WHERE j.candidate_id = s.candidate_id) LIMIT 1').get(MODEL, DIMENSIONS)
+    if (!ready) return { available: false, reason: 'The local semantic index is not ready yet.', results: [] }
+    const [query] = await worker.request<number[][]>({ type: 'embed', texts: [text] })
+    if (!query || query.length !== DIMENSIONS) throw new Error('Local embedding model returned an unexpected vector dimension.')
+    const ranked = await worker.request<Ranked[]>({ type: 'rank', query, filters, limit })
+    return { available: true, reason: null, results: ranked.map((row, i) => ({ ...row, id: `${row.candidateId}:${i}`, metadata: { source: row.source } })) }
   }
 
-  static async getEmbeddingModels(provider: EmbeddingProviderName): Promise<EmbeddingModelInfo[]> {
-    if (provider === 'local') {
-      return [
-        { model_id: DEFAULT_EMBEDDING_MODELS.local, name: 'MiniLM L6 v2 (local)' }
-      ]
-    }
-
-    if (provider === 'openai') {
-      return [
-        { model_id: 'text-embedding-3-small', name: 'OpenAI text-embedding-3-small' },
-        { model_id: 'text-embedding-3-large', name: 'OpenAI text-embedding-3-large' }
-      ]
-    }
-
-    if (provider === 'gemini') {
-      return [
-        { model_id: 'gemini-embedding-001', name: 'Gemini embedding 001' },
-        { model_id: 'text-embedding-004', name: 'Gemini text embedding 004' }
-      ]
-    }
-
-    const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get('openrouter') as EncryptedKeyRow | undefined
-    if (!row) {
-      return [
-        { model_id: DEFAULT_EMBEDDING_MODELS.openrouter, name: 'OpenAI text-embedding-3-small via OpenRouter' }
-      ]
-    }
-    const { OpenRouter } = await import('@openrouter/sdk')
-    const client = new OpenRouter({
-      apiKey: decryptProviderKey(row),
-      httpReferer: 'http://localhost',
-      appTitle: 'CeeVee',
-      appCategories: 'productivity'
-    })
-    const response = await client.embeddings.listModels() as OpenRouterModelListResponse
-    return (response.data || []).map((model) => ({
-      model_id: model.id,
-      name: model.name || model.id
-    }))
-  }
-
-  private static setIndexStatus(status: VectorSearchSettings['embedding_index_status']) {
-    db.prepare(`
-      INSERT INTO app_settings (setting_key, setting_value)
-      VALUES ('embedding_index_status', ?)
-      ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
-    `).run(status)
-  }
-
-  private static async createProvider(settings: VectorSearchSettings) {
-    let apiKey = ''
-    if (settings.embedding_provider !== 'local') {
-      const providerKey = settings.embedding_provider === 'openrouter' ? 'openrouter' : settings.embedding_provider
-      const row = db.prepare('SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = ?').get(providerKey) as EncryptedKeyRow | undefined
-      if (!row) throw new Error(`${settings.embedding_provider} API key is not configured.`)
-      apiKey = decryptProviderKey(row)
-    }
-
-    return createEmbeddingProvider({
-      provider: settings.embedding_provider,
-      model: settings.embedding_model,
-      apiKey
-    })
-  }
-
-  private static async getClient(settings: VectorSearchSettings) {
-    const { ChromaClient } = await import('chromadb')
-    return new ChromaClient({
-      host: settings.chroma_host,
-      port: Number(settings.chroma_port),
-      ssl: settings.chroma_ssl
-    })
-  }
-
-  private static async getCollection(settings: VectorSearchSettings) {
-    const client = await this.getClient(settings)
-    return client.getOrCreateCollection({ name: COLLECTION_NAME, metadata: { embedding_model: settings.embedding_model } })
-  }
+  private static setIndexStatus(status: IndexStatus) { db.prepare("INSERT OR REPLACE INTO app_settings (setting_key, setting_value) VALUES ('embedding_index_status', ?)").run(status) }
 }
 
 export function chunkText(rawText: string): string[] {
-  return rawText
-    .split(/\n{2,}/)
-    .map((chunk) => chunk.replace(/\s+/g, ' ').trim())
-    .filter((chunk) => chunk.length >= 80)
-    .flatMap((chunk) => chunk.length <= 1200 ? [chunk] : splitLongChunk(chunk))
-    .slice(0, 24)
-}
-
-function splitLongChunk(chunk: string): string[] {
-  const parts: string[] = []
-  for (let index = 0; index < chunk.length; index += 1000) {
-    parts.push(chunk.slice(index, index + 1200).trim())
-  }
-  return parts
-}
-
-function buildMetadata(candidate: SearchableCandidate, chunkIndex: number): ChromaCandidateMetadata {
-  return {
-    candidate_id: candidate.id,
-    candidate_name: String(`${candidate.first_name || ''} ${candidate.last_name || ''}`.trim()),
-    email: String(candidate.email || ''),
-    phone: String(candidate.phone || ''),
-    headline: String(candidate.headline || ''),
-    job_type: String(candidate.job_type || ''),
-    tags: candidate.tags || '[]',
-    file_path: String(candidate.file_path || ''),
-    chunk_index: chunkIndex,
-    updated_at: candidate.updated_at || candidate.created_at || ''
-  }
-}
-
-function assignSetting(settings: VectorSearchSettings, key: keyof VectorSearchSettings, value: string) {
-  if (key === 'vector_search_enabled' || key === 'chroma_ssl') {
-    settings[key] = value === 'true'
-  } else if (key === 'chroma_port' || key === 'embedding_dimension') {
-    settings[key] = Number(value)
-  } else if (key === 'embedding_provider') {
-    settings[key] = value as EmbeddingProviderName
-  } else if (key === 'embedding_index_status') {
-    settings[key] = value as VectorSearchSettings['embedding_index_status']
-  } else if (key === 'vector_db_provider') {
-    settings[key] = 'chromadb'
-  } else {
-    settings[key] = value
-  }
-}
-
-function getErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  const text = rawText.replace(/\s+/g, ' ').trim()
+  if (!text) return []
+  const chunks: string[] = []
+  for (let i = 0; i < text.length && chunks.length < 96; i += 280) chunks.push(text.slice(i, i + 320).trim())
+  return chunks
 }

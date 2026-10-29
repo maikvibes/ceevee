@@ -92,9 +92,9 @@ export function scoreCandidateForJobDescription(candidate: SearchableCandidate, 
 
 function extractKeywords(normalizedText: string): string[] {
   const words = normalizedText
-    .split(/[^a-z0-9.+#-]+/i)
+    .split(/[^\p{L}\p{N}.+#-]+/u)
     .map((word) => word.trim())
-    .filter((word) => word.length >= 4 && !STOP_WORDS.has(word))
+    .filter((word) => word.length >= (/[^\x00-\x7f]/.test(word) ? 2 : 4) && !STOP_WORDS.has(word))
 
   return Array.from(new Set(words)).slice(0, 40)
 }
@@ -102,7 +102,7 @@ function extractKeywords(normalizedText: string): string[] {
 function includesTerm(normalizedText: string, term: string) {
   const normalizedTerm = normalize(term)
   if (!normalizedTerm) return false
-  return new RegExp(`(^|[^a-z0-9])${escapeRegExp(normalizedTerm)}([^a-z0-9]|$)`, 'i').test(normalizedText)
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(normalizedTerm)}([^\\p{L}\\p{N}]|$)`, 'iu').test(normalizedText)
 }
 
 function normalize(value: string) {

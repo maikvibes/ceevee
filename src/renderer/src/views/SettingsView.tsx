@@ -36,16 +36,19 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { useTheme } from '../components/theme-provider'
 import { Brain, Palette, Link as LinkIcon, Shield, Check, ChevronsUpDown, Bot, Loader2, Database, RefreshCw } from 'lucide-react'
 import { SiAnthropic, SiOpenrouter, SiGooglegemini, SiMeta, SiMistralai, SiBaidu, SiNvidia, SiPerplexity, SiXiaomi, SiBytedance, SiMinimax, SiAlibabacloud } from '@icons-pack/react-simple-icons'
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
+import { ProviderAutoSaver, type ProviderChanges } from '../lib/provider-auto-save'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { MasterPasswordDialog } from '../components/settings/MasterPasswordDialog'
 import { SecuredInput } from '../components/settings/SecuredInput'
 import { Badge } from '@/components/ui/badge'
 import { X, Tags } from 'lucide-react'
 import { toast } from 'sonner'
+import { formatFileSize } from '../lib/format-file-size'
 
 const ProviderIcon = ({ provider, modelId, className }: { provider: string, modelId?: string, className?: string }) => {
   let effectiveProvider = provider
@@ -75,32 +78,25 @@ const ProviderIcon = ({ provider, modelId, className }: { provider: string, mode
   }
 }
 
-type EmbeddingProviderName = 'local' | 'openai' | 'gemini' | 'openrouter'
-
 interface VectorSearchSettings {
   vector_search_enabled: boolean
-  vector_db_provider: 'chromadb'
-  chroma_host: string
-  chroma_port: number
-  chroma_ssl: boolean
-  embedding_provider: EmbeddingProviderName
+  embedding_provider: 'local'
   embedding_model: string
   embedding_dimension: number
   embedding_index_status: 'disabled' | 'not_indexed' | 'indexing' | 'indexed' | 'stale' | 'error'
 }
-
 interface VectorStatus {
   settings: VectorSearchSettings
-  chromaReachable: boolean
   indexedChunks: number
   candidateCount: number
+  pending: number
   message: string
 }
 
-interface EmbeddingModel {
-  model_id: string
-  name: string
-}
+interface DuplicateCandidate { id: number; first_name: string; last_name: string; email: string; phone: string }
+interface DuplicatePair { first: DuplicateCandidate; second: DuplicateCandidate; reasons: string[] }
+
+
 
 export function SettingsView() {
   const { theme, setTheme, colorTheme, setColorTheme, customStyle, setCustomStyle } = useTheme()
@@ -115,10 +111,28 @@ export function SettingsView() {
   const [openCombobox, setOpenCombobox] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const [saveStatus, setSaveStatus] = useState('')
+  const [llmOcrEnabled, setLlmOcrEnabled] = useState(true)
+  const [llmOcrAlways, setLlmOcrAlways] = useState(false)
+  const [llmOcrLoading, setLlmOcrLoading] = useState(true)
+  const [llmOcrStatus, setLlmOcrStatus] = useState('')
 
-  const [ocrProvider, setOcrProvider] = useState('none')
-  const [ocrApiKey, setOcrApiKey] = useState('')
-  const [ocrSaveStatus, setOcrSaveStatus] = useState('')
+  const currentProvider = useRef(provider)
+  currentProvider.current = provider
+  const autoSaver = useRef<ProviderAutoSaver | null>(null)
+  if (!autoSaver.current) {
+    autoSaver.current = new ProviderAutoSaver(
+      (name, changes) => window.api.saveProviderConfig(name, changes),
+      (name, result) => {
+        if (currentProvider.current === name) setSaveStatus(result.success ? 'Saved' : `Not saved: ${result.error}`)
+      },
+    )
+  }
+  const saveProviderChange = (changes: ProviderChanges) => {
+    setSaveStatus('Saving...')
+    autoSaver.current!.schedule(provider, changes)
+  }
+
+  useEffect(() => () => { autoSaver.current?.flushAll() }, [])
 
   const filteredModels = useMemo(() => {
     if (!searchQuery) return models
@@ -146,19 +160,24 @@ export function SettingsView() {
   const [deleteInputString, setDeleteInputString] = useState('')
   const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false)
   const [isDeletingAllData, setIsDeletingAllData] = useState(false)
-  const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false)
+  const [cvStorageBytes, setCvStorageBytes] = useState<number | null>(null)
+  const [isCopyingCvs, setIsCopyingCvs] = useState(false)
+  const [copyCvStatus, setCopyCvStatus] = useState('')
+  const [duplicatePairs, setDuplicatePairs] = useState<DuplicatePair[]>([])
+  const [showDuplicateReview, setShowDuplicateReview] = useState(false)
+  const [pendingMerge, setPendingMerge] = useState<{ target: DuplicateCandidate; source: DuplicateCandidate } | null>(null)
+  const [mergingCandidates, setMergingCandidates] = useState(false)
 
   const [customTags, setCustomTags] = useState<any[]>([])
   const [newTag, setNewTag] = useState('')
   const [newJobType, setNewJobType] = useState('')
   const [vectorStatus, setVectorStatus] = useState<VectorStatus | null>(null)
   const [vectorSettings, setVectorSettings] = useState<VectorSearchSettings | null>(null)
-  const [embeddingModels, setEmbeddingModels] = useState<EmbeddingModel[]>([])
-  const [isTestingVectorDb, setIsTestingVectorDb] = useState(false)
   const [isReindexing, setIsReindexing] = useState(false)
 
   useEffect(() => {
     localStorage.setItem('active_ai_provider', provider)
+    void window.api.setAppSetting('active_ai_provider', provider)
     loadProviderSettings()
   }, [provider])
 
@@ -166,80 +185,48 @@ export function SettingsView() {
     window.api.getSavedProviderSettings('notion').then((res: any) => {
       if (res.success && res.data) setNotionDb(res.data.model || '')
     })
+    Promise.all([window.api.getAppSetting('llm_ocr_enabled'), window.api.getAppSetting('llm_ocr_always')]).then(([enabled, always]) => {
+      if (enabled.success && always.success) {
+        setLlmOcrEnabled(enabled.value !== 'false')
+        setLlmOcrAlways(always.value === 'true')
+      } else setLlmOcrStatus('Could not load OCR settings')
+    }).catch(() => setLlmOcrStatus('Could not load OCR settings')).finally(() => setLlmOcrLoading(false))
     // Fix 1: load notion_auto_sync so checkbox restores on every open
     window.api.getAppSetting('notion_auto_sync').then((res: any) => {
       if (res.success && res.value) setNotionAutoSync(res.value === 'true')
     })
-    window.api.getAppSetting('ocr_provider').then((res: any) => {
-      if (res.success && res.value) setOcrProvider(res.value)
-    })
+    window.api.getCvStorageUsage().then((res) => { if (res.success) setCvStorageBytes(res.totalStorage ?? 0) })
     loadTags()
     loadVectorStatus()
   }, [])
 
   useEffect(() => {
-    if (vectorSettings) {
-      loadEmbeddingModels(vectorSettings.embedding_provider)
-    }
-  }, [vectorSettings?.embedding_provider])
+    const timer = window.setInterval(() => { void loadVectorStatus() }, 3000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const loadVectorStatus = async () => {
     const res = await window.api.getVectorSearchStatus()
     if (res.success && res.data) {
       setVectorStatus(res.data)
       setVectorSettings(res.data.settings)
-      await loadEmbeddingModels(res.data.settings.embedding_provider)
     }
   }
 
-  const loadEmbeddingModels = async (embeddingProvider: EmbeddingProviderName) => {
-    const res = await window.api.getEmbeddingModels(embeddingProvider)
-    if (res.success && res.data) {
-      setEmbeddingModels(res.data)
-    } else {
-      setEmbeddingModels([])
-    }
-  }
-
-  const updateVectorSetting = <K extends keyof VectorSearchSettings>(key: K, value: VectorSearchSettings[K]) => {
-    setVectorSettings((current) => current ? { ...current, [key]: value } : current)
-  }
-
-  const handleSaveVectorSettings = async () => {
-    if (!vectorSettings) return
-    const res = await window.api.saveVectorSearchSettings(vectorSettings)
-    if (res.success) {
-      toast.success('Vector search settings saved.')
-      await loadVectorStatus()
-    } else {
-      toast.error(`Save failed: ${res.error}`)
-    }
-  }
-
-  const handleTestVectorConnection = async () => {
-    if (!vectorSettings) return
-    setIsTestingVectorDb(true)
-    const res = await window.api.testVectorDbConnection(vectorSettings)
-    setIsTestingVectorDb(false)
-    if (res.success) {
-      toast.success(`ChromaDB connected${res.data?.version ? ` (${res.data.version})` : ''}.`)
-      await loadVectorStatus()
-    } else {
-      toast.error(`ChromaDB unavailable: ${res.error}`)
-    }
+  const handleSemanticToggle = async (enabled: boolean) => {
+    setVectorSettings((current) => current ? { ...current, vector_search_enabled: enabled } : current)
+    const res = await window.api.saveVectorSearchSettings({ vector_search_enabled: enabled })
+    if (!res.success) toast.error(`Could not update semantic search: ${res.error}`)
+    await loadVectorStatus()
   }
 
   const handleReindexVectors = async () => {
     setIsReindexing(true)
     const res = await window.api.reindexCandidateVectors()
     setIsReindexing(false)
-    if (res.success) {
-      toast.success(`Indexed ${res.data?.indexedCandidates || 0} candidates.`)
-      await loadVectorStatus()
-    } else {
-      toast.error(`Reindex failed: ${res.error}`)
-      await loadVectorStatus()
-    }
+    if (res.success) toast.success(`Queued ${res.data?.indexedCandidates || 0} candidates for indexing.`)
+    else toast.error(`Could not start indexing: ${res.error}`)
+    await loadVectorStatus()
   }
 
   const loadTags = async () => {
@@ -278,6 +265,7 @@ export function SettingsView() {
     setIsLoadingModels(true)
     // Load models
     const res = await window.api.getModels(provider)
+    if (currentProvider.current !== provider) return
     if (res.success && res.data) {
       setModels(res.data)
     } else {
@@ -286,6 +274,7 @@ export function SettingsView() {
 
     // Load saved settings
     const settingsRes = await window.api.getSavedProviderSettings(provider)
+    if (currentProvider.current !== provider) return
     if (settingsRes.success && settingsRes.data) {
       setSelectedModel(settingsRes.data.model || '')
       setBaseUrl(settingsRes.data.baseUrl || '')
@@ -298,63 +287,38 @@ export function SettingsView() {
 
   const handleRefreshModels = async () => {
     setIsFetchingModels(true)
+    const saved = await autoSaver.current!.flush(provider)
+    if (!saved.success) {
+      setSaveStatus(`Not saved: ${saved.error}`)
+      setIsFetchingModels(false)
+      return
+    }
     const res = await window.api.fetchModels(provider)
     if (res.success) {
-      await loadProviderSettings()
-    } else {
+      const modelsRes = await window.api.getModels(provider)
+      if (modelsRes.success && modelsRes.data && currentProvider.current === provider) setModels(modelsRes.data)
+    } else if (currentProvider.current === provider) {
       setSaveStatus(`Failed to fetch models: ${res.error}`)
     }
     setIsFetchingModels(false)
   }
 
-  const handleSaveApiKey = async () => {
-    setSaveStatus('Saving...')
-    const isLocked = await window.api.isKeystoreLocked()
-    if (isLocked) {
-      setSaveStatus('')
-      setShowPasswordDialog(true)
-      return
-    }
-
-    await executeSaveKey()
-  }
-
-  const executeSaveKey = async () => {
-    if (!apiKey.trim()) {
-      setSaveStatus('Key cannot be empty')
-      return
-    }
-    const res = await window.api.saveApiKey(provider, apiKey.trim(), selectedModel, provider === 'openrouter' ? undefined : baseUrl)
-    if (res.success) {
-      await loadProviderSettings()
-      setSaveStatus('Saved securely!')
-    } else {
-      setSaveStatus(`Error: ${res.error}`)
-    }
-  }
-
-  const handleSaveOcrSettings = async () => {
-    setOcrSaveStatus('Saving...')
-    const isLocked = await window.api.isKeystoreLocked()
-    if (isLocked) {
-      setOcrSaveStatus('Unlock keystore to save')
-      setShowPasswordDialog(true)
-      return
-    }
-
-    const resProvider = await window.api.setAppSetting('ocr_provider', ocrProvider)
-    
-    let resKey = { success: true }
-    if (ocrApiKey.trim()) {
-      resKey = await window.api.saveApiKey('ocr', ocrApiKey.trim(), '')
-    }
-
-    if (resProvider.success && resKey.success) {
-      setOcrSaveStatus('Saved successfully!')
-      toast.success('OCR Configuration saved!')
-    } else {
-      setOcrSaveStatus('Failed to save configuration')
-      toast.error('Failed to save OCR configuration')
+  const handleLlmOcrChange = async (setting: 'llm_ocr_enabled' | 'llm_ocr_always', enabled: boolean) => {
+    setLlmOcrLoading(true)
+    setLlmOcrStatus('Saving...')
+    try {
+      const result = await window.api.setAppSetting(setting, String(enabled))
+      if (result.success) {
+        if (setting === 'llm_ocr_enabled') setLlmOcrEnabled(enabled)
+        else setLlmOcrAlways(enabled)
+        setLlmOcrStatus('Saved')
+      } else {
+        setLlmOcrStatus(`Not saved: ${result.error}`)
+      }
+    } catch {
+      setLlmOcrStatus('Could not save setting')
+    } finally {
+      setLlmOcrLoading(false)
     }
   }
 
@@ -372,7 +336,7 @@ export function SettingsView() {
     await window.api.setAppSetting('notion_auto_sync', notionAutoSync.toString())
 
     if (!notionKey.trim()) {
-      // Token not changed — settings (auto_sync, db) already saved above
+      // Token not changed â€” settings (auto_sync, db) already saved above
       setNotionSaveStatus('Settings saved!')
       return
     }
@@ -407,21 +371,50 @@ export function SettingsView() {
     const res = await window.api.deleteAllData()
     setIsDeletingAllData(false)
     if (res.success) {
-      toast.success("All data has been deleted successfully.")
+      if (res.warning) toast.warning(res.warning)
+      else toast.success("All data has been deleted successfully.")
       setIsDeleteDialogOpen(false)
     } else {
       toast.error(`Failed to delete data: ${res.error}`)
     }
   }
 
-  const handleDeleteDuplicates = async () => {
-    setIsDeletingDuplicates(true)
-    const res = await window.api.deleteDuplicateCandidates()
-    setIsDeletingDuplicates(false)
-    if (res.success) {
-      toast.success(`Cleaned successfully! Deleted ${res.deletedCount || 0} duplicate candidates.`)
-    } else {
-      toast.error(`Failed to clean duplicates: ${res.error}`)
+  const loadDuplicateCandidates = async () => {
+    const result = await window.api.getDuplicateCandidates()
+    if (!result.success) { toast.error(result.error || 'Could not find possible duplicates.'); return }
+    setDuplicatePairs(result.data || [])
+    setShowDuplicateReview(true)
+  }
+
+  const confirmCandidateMerge = async () => {
+    if (!pendingMerge) return
+    setMergingCandidates(true)
+    try {
+      const result = await window.api.mergeCandidates(pendingMerge.target.id, pendingMerge.source.id)
+      if (!result.success) throw new Error(result.error || 'Could not merge candidates.')
+      if (result.warning) toast.warning(result.warning)
+      else toast.success('Candidates merged; both CV histories were retained.')
+      setPendingMerge(null)
+      await loadDuplicateCandidates()
+    } catch (error) { toast.error(error instanceof Error ? error.message : String(error)) }
+    finally { setMergingCandidates(false) }
+  }
+
+  const handleCopyExistingCvs = async () => {
+    setIsCopyingCvs(true)
+    setCopyCvStatus('Copying...')
+    try {
+      const res = await window.api.copyExistingCvs()
+      if (!res.success || !res.data) {
+        setCopyCvStatus(`Copy failed: ${res.error || 'Unknown error'}`)
+        return
+      }
+      setCvStorageBytes(res.data.totalStorage)
+      setCopyCvStatus(`${res.data.copied} copied, ${res.data.alreadyManaged} already managed, ${res.data.unavailable} unavailable.`)
+    } catch (error) {
+      setCopyCvStatus(`Copy failed: ${error instanceof Error ? error.message : String(error)}`)
+    } finally {
+      setIsCopyingCvs(false)
     }
   }
 
@@ -601,15 +594,17 @@ export function SettingsView() {
                 provider={provider}
                 value={apiKey}
                 onChange={setApiKey}
-                placeholder="sk-..."
+                onUserChange={(key) => saveProviderChange({ key })}
+                onUnlocked={() => { void autoSaver.current!.flush(provider) }}
+                placeholder="API key (optional for custom URLs)"
               />
             </div>
           </SettingsNestedRow>
           {provider !== 'openrouter' && (
             <SettingsNestedRow label="Base URL">
               <div className="flex flex-col gap-1 w-72">
-                <Input aria-label="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'} />
-                <span className="text-xs text-muted-foreground">Optional. Save before fetching models. Gemini adds its API version automatically.</span>
+                <Input aria-label="Base URL" disabled={isLoadingModels} value={baseUrl} onChange={(e) => { setBaseUrl(e.target.value); saveProviderChange({ baseUrl: e.target.value }) }} placeholder={provider === 'gemini' ? 'https://generativelanguage.googleapis.com' : provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'https://api.openai.com/v1'} />
+                <span className="text-xs text-muted-foreground">Optional. Changes save automatically. Gemini adds its API version automatically.</span>
               </div>
             </SettingsNestedRow>
           )}
@@ -664,6 +659,7 @@ export function SettingsView() {
                                   value={`${m.name} ${m.model_id}`} // allow searching by name or id
                                   onSelect={() => {
                                     setSelectedModel(m.model_id)
+                                    saveProviderChange({ model: m.model_id })
                                     setOpenCombobox(false)
                                   }}
                                   style={{
@@ -698,173 +694,57 @@ export function SettingsView() {
                 </Button>
               </div>
 
-              <Input aria-label="Model ID" value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)} placeholder="Or enter a model ID" className="w-[280px]" />
+              <Input aria-label="Model ID" disabled={isLoadingModels} value={selectedModel} onChange={(e) => { setSelectedModel(e.target.value); saveProviderChange({ model: e.target.value }) }} placeholder="Or enter a model ID" className="w-[280px]" />
               <div className="flex items-center gap-4 mt-2">
-                <Button onClick={handleSaveApiKey} variant="secondary">Save Provider Configuration</Button>
                 {saveStatus && <span className="text-sm text-muted-foreground">{saveStatus}</span>}
               </div>
             </div>
           </SettingsNestedRow>
 
-          <hr className="my-6 border-border" />
-
-          <SettingsNestedRow label="OCR Fallback Provider">
-            <Select value={ocrProvider} onValueChange={setOcrProvider}>
-              <SelectTrigger className="w-[180px]">
-                <SelectValue placeholder="Select OCR provider" />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="none">None (Disabled)</SelectItem>
-                <SelectItem value="gemini">Gemini</SelectItem>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="anthropic">Anthropic</SelectItem>
-              </SelectContent>
-            </Select>
+          <SettingsNestedRow label="Enable LLM file processing" alignTop>
+            <div className="flex max-w-[400px] items-start gap-3">
+              <input id="llm-ocr-enabled" type="checkbox" checked={llmOcrEnabled} disabled={llmOcrLoading} onChange={(event) => { void handleLlmOcrChange('llm_ocr_enabled', event.target.checked) }} className="mt-1 h-4 w-4" aria-label="Enable LLM file processing" />
+              <div className="space-y-1 text-sm text-muted-foreground">
+                <label htmlFor="llm-ocr-enabled">If text extraction and local OCR cannot read enough text, send the PDF or image to the selected AI model. This can incur additional charges.</label>
+                {llmOcrStatus && <p role="status">{llmOcrStatus}</p>}
+              </div>
+            </div>
           </SettingsNestedRow>
-
-          {ocrProvider !== 'none' && (
-            <>
-              <SettingsNestedRow label="OCR API Key">
-                <div className="flex flex-col gap-2 w-72">
-                  <SecuredInput
-                    provider="ocr"
-                    value={ocrApiKey}
-                    onChange={setOcrApiKey}
-                    placeholder="Enter API Key for OCR"
-                  />
-                </div>
-              </SettingsNestedRow>
-              <SettingsNestedRow label="OCR Model" alignTop>
-                <div className="flex flex-col gap-3">
-                  <span className="text-sm text-muted-foreground">OCR uses the model saved for the selected provider in AI Provider Settings. Choose a model that supports document or image input.</span>
-                  <div className="flex items-center gap-4 mt-2">
-                    <Button onClick={handleSaveOcrSettings} variant="secondary">Save OCR Configuration</Button>
-                    {ocrSaveStatus && <span className="text-sm text-muted-foreground">{ocrSaveStatus}</span>}
-                  </div>
-                </div>
-              </SettingsNestedRow>
-            </>
-          )}
+          <SettingsNestedRow label="Always send file to LLM" alignTop>
+            <div className="flex max-w-[400px] items-start gap-3">
+              <input id="llm-ocr-always" type="checkbox" checked={llmOcrAlways} disabled={llmOcrLoading || !llmOcrEnabled} onChange={(event) => { void handleLlmOcrChange('llm_ocr_always', event.target.checked) }} className="mt-1 h-4 w-4" aria-label="Always send file to LLM" />
+              <label htmlFor="llm-ocr-always" className="text-sm text-muted-foreground">Send every PDF or image directly to the selected model, skipping local text extraction and OCR. This can cost more and requires a model that supports file input.</label>
+            </div>
+          </SettingsNestedRow>
         </SettingsAccordionItem>
 
         <SettingsAccordionItem
           value="item-vector-search"
           icon={<Database className="size-5" />}
-          title="Vector Search"
-          subtitle="Optional ChromaDB semantic matching for job-description search"
+          title="Semantic Search"
+          subtitle="Local semantic matching for job-description search"
         >
           {vectorSettings && (
             <div className="p-6 space-y-5">
-              <div className="rounded-md border border-border bg-muted/30 p-3 text-sm">
+              <div className="rounded-md border border-border bg-muted/30 p-3 text-sm" aria-live="polite">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Badge variant={vectorSettings.vector_search_enabled ? 'default' : 'secondary'}>
-                    {vectorSettings.vector_search_enabled ? 'Enabled' : 'Disabled'}
-                  </Badge>
-                  <Badge variant={vectorStatus?.chromaReachable ? 'default' : 'outline'}>
-                    {vectorStatus?.chromaReachable ? 'Chroma reachable' : 'Chroma offline'}
-                  </Badge>
+                  <Badge variant={vectorSettings.vector_search_enabled ? 'default' : 'secondary'}>{vectorSettings.vector_search_enabled ? 'Enabled' : 'Paused'}</Badge>
                   <Badge variant="outline">{vectorSettings.embedding_index_status}</Badge>
-                  <span className="text-muted-foreground">
-                    {vectorStatus?.indexedChunks || 0} chunks across {vectorStatus?.candidateCount || 0} candidates
-                  </span>
+                  <span className="text-muted-foreground">{vectorStatus?.indexedChunks || 0} indexed chunks ? {vectorStatus?.pending || 0} candidates pending</span>
                 </div>
-                <p className="mt-2 text-muted-foreground">
-                  Start Chroma with <code className="rounded bg-background px-1 py-0.5">chroma run --path ./chroma</code>, then test the connection.
-                </p>
+                <p className="mt-2 text-muted-foreground">{vectorStatus?.message}</p>
               </div>
-
-              <SettingsNestedRow label="Enable Semantic Search">
-                <input
-                  type="checkbox"
-                  checked={vectorSettings.vector_search_enabled}
-                  onChange={(event) => updateVectorSetting('vector_search_enabled', event.target.checked)}
-                  className="h-4 w-4 rounded"
-                />
-              </SettingsNestedRow>
-
-              <SettingsNestedRow label="Chroma Endpoint">
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    value={vectorSettings.chroma_host}
-                    onChange={(event) => updateVectorSetting('chroma_host', event.target.value)}
-                    className="w-44"
-                  />
-                  <Input
-                    type="number"
-                    value={vectorSettings.chroma_port}
-                    onChange={(event) => updateVectorSetting('chroma_port', Number(event.target.value))}
-                    className="w-24"
-                  />
-                  <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <input
-                      type="checkbox"
-                      checked={vectorSettings.chroma_ssl}
-                      onChange={(event) => updateVectorSetting('chroma_ssl', event.target.checked)}
-                    />
-                    SSL
-                  </label>
-                  <Button variant="outline" size="sm" onClick={handleTestVectorConnection} disabled={isTestingVectorDb}>
-                    {isTestingVectorDb ? <Loader2 className="mr-2 size-4 animate-spin" /> : null}
-                    Test
-                  </Button>
+              <SettingsNestedRow label="Enable semantic search" alignTop>
+                <div className="flex max-w-[440px] items-start gap-3">
+                  <input type="checkbox" checked={vectorSettings.vector_search_enabled} onChange={(event) => { void handleSemanticToggle(event.target.checked) }} className="mt-1 h-4 w-4" aria-label="Enable semantic search" />
+                  <span className="text-sm text-muted-foreground">Uses a multilingual local model and stores vectors in CeeVee's SQLite database. Enabling downloads the model on first use (about 120 MB plus tokenizer files). Disable to pause after the current batch; keyword search still works.</span>
                 </div>
               </SettingsNestedRow>
-
-              <SettingsNestedRow label="Embedding Provider">
-                <Select
-                  value={vectorSettings.embedding_provider}
-                  onValueChange={(value) => {
-                    const providerName = value as EmbeddingProviderName
-                    updateVectorSetting('embedding_provider', providerName)
-                  }}
-                >
-                  <SelectTrigger className="w-[220px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="local">Local</SelectItem>
-                    <SelectItem value="openai">OpenAI</SelectItem>
-                    <SelectItem value="gemini">Gemini</SelectItem>
-                    <SelectItem value="openrouter">OpenRouter</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsNestedRow>
-
-              <SettingsNestedRow label="Embedding Model">
-                <Select
-                  value={vectorSettings.embedding_model}
-                  onValueChange={(value) => updateVectorSetting('embedding_model', value)}
-                >
-                  <SelectTrigger className="w-[320px]">
-                    <SelectValue placeholder="Select embedding model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {embeddingModels.map((model) => (
-                      <SelectItem key={model.model_id} value={model.model_id}>
-                        {model.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </SettingsNestedRow>
-
-              <SettingsNestedRow label="Embedding Dimension">
-                <Input
-                  type="number"
-                  value={vectorSettings.embedding_dimension}
-                  onChange={(event) => updateVectorSetting('embedding_dimension', Number(event.target.value))}
-                  className="w-28"
-                />
-              </SettingsNestedRow>
-
-              <SettingsNestedRow label="" alignTop>
-                <div className="flex flex-wrap gap-2">
-                  <Button variant="secondary" onClick={handleSaveVectorSettings}>Save Vector Settings</Button>
-                  <Button variant="outline" onClick={handleReindexVectors} disabled={isReindexing || !vectorSettings.vector_search_enabled}>
-                    {isReindexing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
-                    Reindex Candidates
-                  </Button>
-                </div>
+              <SettingsNestedRow label="Local index">
+                <Button variant="outline" onClick={handleReindexVectors} disabled={isReindexing || !vectorSettings.vector_search_enabled}>
+                  {isReindexing ? <Loader2 className="mr-2 size-4 animate-spin" /> : <RefreshCw className="mr-2 size-4" />}
+                  Reindex candidates
+                </Button>
               </SettingsNestedRow>
             </div>
           )}
@@ -954,16 +834,22 @@ export function SettingsView() {
           
           <div className="h-px bg-border my-2 mx-6" />
 
-          <SettingsNestedRow label="Clean Duplicate CVs" alignTop>
+          <SettingsNestedRow label="Review duplicate candidates" alignTop>
             <div className="flex flex-col gap-3 max-w-[400px]">
-              <p className="text-sm text-muted-foreground leading-relaxed">
-                This will automatically scan the database for candidate profiles with duplicate emails, phone numbers, or full names, keeping only the newest entry.
-              </p>
-              <div>
-                <Button variant="outline" onClick={handleDeleteDuplicates} disabled={isDeletingDuplicates}>
-                  {isDeletingDuplicates ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Cleaning...</> : "Clean Duplicates"}
-                </Button>
-              </div>
+              <p className="text-sm text-muted-foreground">Review possible matches before merging. Candidate CV histories are preserved.</p>
+              <div><Button variant="outline" onClick={() => void loadDuplicateCandidates()}>Review possible duplicates</Button></div>
+            </div>
+          </SettingsNestedRow>
+          <div className="h-px bg-border my-2 mx-6" />
+
+          <SettingsNestedRow label="CV storage" alignTop>
+            <div className="flex flex-col gap-3 max-w-[400px]">
+              <p className="text-sm text-muted-foreground leading-relaxed">CeeVee keeps its own copies of CV versions. Original files are left in place.</p>
+              <p className="text-sm text-muted-foreground">Managed CVs: {formatFileSize(cvStorageBytes)}</p>
+              <div><Button variant="outline" onClick={handleCopyExistingCvs} disabled={isCopyingCvs}>
+                {isCopyingCvs ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Copying...</> : 'Copy existing CVs to CeeVee'}
+              </Button></div>
+              {copyCvStatus && <p className="text-sm text-muted-foreground" role="status">{copyCvStatus}</p>}
             </div>
           </SettingsNestedRow>
           
@@ -972,7 +858,7 @@ export function SettingsView() {
           <SettingsNestedRow label="Delete All Data" alignTop>
             <div className="flex flex-col gap-3 max-w-[400px]">
               <p className="text-sm text-muted-foreground leading-relaxed">
-                This will permanently delete all parsed candidates, documents, and synchronization history. Your settings and API keys will be preserved.
+                This permanently deletes candidates, queued documents, managed CV copies, and synchronization history. Original files, Notion pages, settings, and API keys are preserved.
               </p>
               <div>
                 <AlertDialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
@@ -985,7 +871,7 @@ export function SettingsView() {
                     <AlertDialogHeader>
                       <AlertDialogTitle>Are you absolutely sure?</AlertDialogTitle>
                       <AlertDialogDescription>
-                        This action cannot be undone. This will permanently delete all your candidate data.
+                        This permanently deletes candidate data and managed CV copies. Original files and Notion pages remain untouched.
                       </AlertDialogDescription>
                       <div className="mt-4 flex flex-col gap-2">
                         <Label className="text-foreground">
@@ -1017,10 +903,33 @@ export function SettingsView() {
 
       </Accordion>
 
+      <Dialog open={showDuplicateReview} onOpenChange={setShowDuplicateReview}>
+        <DialogContent className="max-h-[80vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader><DialogTitle>Review possible duplicates</DialogTitle><DialogDescription>Matching names, emails, or phone numbers are suggestions. Showing up to 200 pairs. Choose which profile to keep only after checking both people.</DialogDescription></DialogHeader>
+          {duplicatePairs.length === 0 ? <p className="text-sm text-muted-foreground">No possible duplicates found.</p> : <div className="space-y-3">
+            {duplicatePairs.map((pair) => <div key={`${pair.first.id}-${pair.second.id}`} className="rounded-lg border p-4 space-y-3">
+              <p className="text-xs text-muted-foreground">Matched by {pair.reasons.join(', ')}</p>
+              {[pair.first, pair.second].map((candidate) => <div key={candidate.id} className="flex items-center justify-between gap-3">
+                <div className="text-sm"><p className="font-medium">{candidate.first_name} {candidate.last_name} <span className="text-muted-foreground">#{candidate.id}</span></p><p className="text-muted-foreground">{candidate.email || 'No email'} ? {candidate.phone || 'No phone'}</p></div>
+                <Button variant="outline" size="sm" onClick={() => setPendingMerge({ target: candidate, source: candidate.id === pair.first.id ? pair.second : pair.first })}>Keep this profile</Button>
+              </div>)}
+            </div>)}
+          </div>}
+        </DialogContent>
+      </Dialog>
+      <AlertDialog open={!!pendingMerge} onOpenChange={(open) => { if (!open && !mergingCandidates) setPendingMerge(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader><AlertDialogTitle>Merge these candidate records?</AlertDialogTitle><AlertDialogDescription>
+            Keep {pendingMerge?.target.first_name} {pendingMerge?.target.last_name} #{pendingMerge?.target.id} and move all CV versions and sync history from #{pendingMerge?.source.id}. The kept profile's edits and status remain; the other profile is archived and removed from the candidate list. Existing Notion pages are not deleted or merged.
+          </AlertDialogDescription></AlertDialogHeader>
+          <AlertDialogFooter><AlertDialogCancel disabled={mergingCandidates}>Cancel</AlertDialogCancel><Button disabled={mergingCandidates} onClick={() => void confirmCandidateMerge()}>Merge candidates</Button></AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
       <MasterPasswordDialog
         open={showPasswordDialog}
         onOpenChange={setShowPasswordDialog}
-        onSuccess={executeSaveKey}
+        onSuccess={() => setSaveStatus('Keystore unlocked. Unlock the API key field before saving.')}
       />
     </div>
   )

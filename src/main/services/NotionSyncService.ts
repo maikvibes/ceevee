@@ -4,6 +4,7 @@ import { KeyStoreService } from './KeyStoreService'
 import * as fs from 'node:fs/promises';
 
 export class NotionSyncService {
+  private static pending = new Map<number, Promise<any>>()
   static getClientAndDatabaseId() {
     const row = db.prepare('SELECT * FROM api_key_store WHERE provider = ?').get('notion') as any
     if (!row) throw new Error('Notion API key not configured')
@@ -22,6 +23,13 @@ export class NotionSyncService {
   }
 
   static async syncCandidate(candidateId: number, onProgress?: (status: string) => void) {
+    const previous = this.pending.get(candidateId)
+    const request = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(() => this.performSync(candidateId, onProgress))
+    this.pending.set(candidateId, request)
+    try { return await request } finally { if (this.pending.get(candidateId) === request) this.pending.delete(candidateId) }
+  }
+
+  private static async performSync(candidateId: number, onProgress?: (status: string) => void) {
     try {
       if (onProgress) onProgress('Syncing to Notion')
 
@@ -34,6 +42,19 @@ export class NotionSyncService {
 
       const candidate = db.prepare('SELECT * FROM candidates WHERE id = ?').get(candidateId) as any
       if (!candidate) throw new Error('Candidate not found')
+
+      let mapping = db.prepare('SELECT page_id, page_url, synced_version_id FROM notion_candidate_pages WHERE candidate_id = ?').get(candidateId) as { page_id: string; page_url: string; synced_version_id: number | null } | undefined
+      if (!mapping) {
+        const previous = db.prepare("SELECT notion_page_url FROM notion_sync_history WHERE candidate_id = ? AND status = 'Success' AND notion_page_url IS NOT NULL ORDER BY id DESC LIMIT 1").get(candidateId) as { notion_page_url: string } | undefined
+        if (previous) {
+          const compact = previous.notion_page_url.replace(/-/g, '')
+          const id = compact.match(/([0-9a-f]{32})(?:[?#/]|$)/i)?.[1]
+          if (!id) throw new Error('Could not identify the previously synced Notion page. Resolve the existing sync before creating another page.')
+          mapping = { page_id: id, page_url: previous.notion_page_url, synced_version_id: null }
+        }
+      }
+      const needsAttachment = !mapping || (!!candidate.current_cv_version_id && candidate.current_cv_version_id !== mapping.synced_version_id)
+      let uploadedCurrentFile = !candidate.file_path
 
       const tagsArray = JSON.parse(candidate.tags || '[]')
       const multiSelectTags = tagsArray.map((t: string) => ({ name: t }))
@@ -82,7 +103,7 @@ export class NotionSyncService {
         })
       }
 
-        if (candidate.file_path) {
+        if (candidate.file_path && needsAttachment) {
           try {
             const path = require('path')
             const ext = path.extname(candidate.file_path).toLowerCase()
@@ -97,14 +118,16 @@ export class NotionSyncService {
             });
 
             const { buffer, byteOffset, length } = await fs.readFile(candidate.file_path)
+            const currentVersion = candidate.current_cv_version_id ? db.prepare('SELECT original_filename FROM candidate_cv_versions WHERE id = ?').get(candidate.current_cv_version_id) as { original_filename: string } | undefined : undefined
             await notion.fileUploads.send({
               file_upload_id: fileUploadResponse.id,
               file: {
-                filename: path.basename(candidate.file_path),
+                filename: currentVersion?.original_filename || path.basename(candidate.file_path),
                 data: new Blob([new Uint8Array(buffer, byteOffset, length)], { type: mimeType })
               },
             })
 
+            uploadedCurrentFile = true
             // Only attach the block if BOTH create + send succeeded
             if (onProgress) onProgress('Attaching CV to Notion Page')
             children.push({
@@ -116,20 +139,30 @@ export class NotionSyncService {
               }
             })
           } catch (uploadErr: any) {
-            console.error('[NotionSyncService] Failed to upload CV file:', uploadErr)
-            // Continue creating page without the file attachment
+            throw new Error(`Failed to upload CV file to Notion: ${uploadErr.message}`)
           }
         }
 
       let response: any
       try {
-        response = await notion.pages.create({
-          parent: { database_id: databaseId },
-          properties,
-          ...(children.length > 0 && { children })
-        }) as any;
+        if (mapping) {
+          response = await notion.pages.update({ page_id: mapping.page_id, properties }) as any
+          // Keep previous attachments as history and append the new current version only once.
+          if (candidate.current_cv_version_id && candidate.current_cv_version_id !== mapping.synced_version_id && children.length) {
+            await notion.blocks.children.append({ block_id: mapping.page_id, children: children as any })
+          }
+          response.url ||= mapping.page_url
+        } else {
+          response = await notion.pages.create({
+            parent: { database_id: databaseId }, properties,
+            ...(children.length > 0 ? { children } : {})
+          }) as any
+        }
+        db.prepare(`INSERT INTO notion_candidate_pages (candidate_id, page_id, page_url, synced_version_id) VALUES (?, ?, ?, ?)
+          ON CONFLICT(candidate_id) DO UPDATE SET page_id = excluded.page_id, page_url = excluded.page_url, synced_version_id = excluded.synced_version_id`)
+          .run(candidateId, response.id || mapping?.page_id, response.url, uploadedCurrentFile ? (candidate.current_cv_version_id || null) : (mapping?.synced_version_id || null))
       } catch (pageErr: any) {
-        throw new Error(`Failed to create Notion page: ${pageErr.message}`)
+        throw new Error(`Failed to sync Notion page: ${pageErr.message}`)
       }
 
       db.prepare(`

@@ -7,6 +7,7 @@ import { candidateController } from './controllers/CandidateController'
 import { settingsController } from './controllers/SettingsController'
 import { documentQueue } from './services/DocumentQueueService'
 import { updateService } from './services/UpdateService'
+import { CVVersionService } from './services/CVVersionService'
 
 function createWindow(): void {
   // Create the browser window.
@@ -86,6 +87,10 @@ app.whenReady().then(() => {
   // App version & environment
   ipcMain.handle('get-app-version', () => app.getVersion())
   ipcMain.handle('get-app-env', () => (is.dev ? 'dev' : 'production'))
+
+  CVVersionService.recoverStagedFiles()
+  CVVersionService.migrateLegacy()
+  void CVVersionService.retryIndexes()
 
   // Register Controllers
   userController.registerHandlers()

@@ -47,4 +47,11 @@ describe('candidate JD search scoring', () => {
       ])
     )
   })
+
+  it('keeps Vietnamese words intact for keyword matching', () => {
+    const signals = extractJobDescriptionSignals('Tìm kỹ sư phát triển phần mềm', [], [])
+    expect(signals.keywords).toContain('triển')
+    const score = scoreCandidateForJobDescription({ id: 1, tags: '[]', raw_text: 'Kỹ sư phát triển phần mềm' }, signals)
+    expect(score.exactReasons.some((reason) => reason.includes('triển'))).toBe(true)
+  })
 })

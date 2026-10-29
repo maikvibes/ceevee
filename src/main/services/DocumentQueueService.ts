@@ -4,7 +4,8 @@ import { AIProcessingService } from './AIProcessingService'
 import { KeyStoreService } from './KeyStoreService'
 import { NotionSyncService } from './NotionSyncService'
 import { BrowserWindow } from 'electron'
-import { VectorSearchService } from './VectorSearchService'
+import { CVVersionService, type StagedFile } from './CVVersionService'
+import path from 'node:path'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const PQueue = require('p-queue').default || require('p-queue')
@@ -21,6 +22,8 @@ export class DocumentQueueService {
     this.mainWindow = window
   }
 
+  isProcessing(): boolean { return this.queue.pending > 0 }
+
   clearQueue() {
     this.queue.clear()
   }
@@ -30,13 +33,23 @@ export class DocumentQueueService {
    */
   async resumeUnfinishedTasks() {
     const unfinishedTasks = db.prepare(`
-      SELECT * FROM document_tasks 
-      WHERE status != 'Complete' AND status != 'Failed' AND status != 'Warning'
-    `).all() as { id: number, file_path: string }[]
+      SELECT * FROM document_tasks
+      WHERE status != 'Complete' AND status != 'Failed' AND status != 'Warning' AND status != 'Needs Review'
+    `).all() as { id: number; file_path: string; provider: string | null; candidate_id: number | null; staged_path: string | null; staged_hash: string | null; staged_size: number | null }[]
 
     for (const task of unfinishedTasks) {
-      console.log(`[Queue] Resuming task ${task.id} for ${task.file_path}`)
-      this.enqueue(task.file_path, task.id as number)
+      if (task.candidate_id !== null && db.prepare('SELECT id FROM candidates WHERE id = ?').get(task.candidate_id)) {
+        this.updateTaskStatus(task.id, 'Warning', task.file_path, 'The CV was saved before processing was interrupted. Check search indexing and Notion sync.')
+        continue
+      }
+      if (db.prepare('SELECT id FROM cv_match_reviews WHERE task_id = ?').get(task.id)) {
+        this.updateTaskStatus(task.id, 'Needs Review', task.file_path)
+        continue
+      }
+      const staged = task.staged_path && task.staged_hash && task.staged_size !== null
+        ? { managedPath: task.staged_path, sourcePath: task.file_path, filename: path.basename(task.file_path), size: task.staged_size, hash: task.staged_hash }
+        : undefined
+      this.enqueue(task.file_path, task.id, task.provider || undefined, staged)
     }
   }
 
@@ -44,141 +57,135 @@ export class DocumentQueueService {
    * Adds a new document to the database queue and starts processing.
    */
   async enqueueNew(filePath: string, provider: string) {
-    const insert = db.prepare(`
-      INSERT INTO document_tasks (file_path, status)
-      VALUES (?, 'Queued')
-    `)
-    const result = insert.run(filePath)
-    const taskId = result.lastInsertRowid as number
-
+    const staged = CVVersionService.stageFile(filePath)
+    let taskId: number
+    try {
+      taskId = db.transaction(() => {
+        db.prepare(`INSERT INTO app_settings (setting_key, setting_value) VALUES ('active_ai_provider', ?)
+          ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value`).run(provider)
+        const result = db.prepare(`INSERT INTO document_tasks (file_path, status, provider, staged_path, staged_hash, staged_size)
+          VALUES (?, 'Queued', ?, ?, ?, ?)`).run(filePath, provider, staged.managedPath, staged.hash, staged.size)
+        return Number(result.lastInsertRowid)
+      })()
+    } catch (error) {
+      CVVersionService.discardFile(staged.managedPath)
+      throw error
+    }
     this.notifyUI(taskId, 'Queued', filePath)
-    return this.enqueue(filePath, taskId, provider)
+    this.enqueue(filePath, taskId, provider, staged)
   }
 
-  private enqueue(filePath: string, taskId: number, provider?: string) {
+  async retryTask(taskId: number) {
+    const task = db.prepare("SELECT * FROM document_tasks WHERE id = ? AND status = 'Failed'").get(taskId) as { file_path: string; provider: string | null; staged_path: string | null; staged_hash: string | null; staged_size: number | null } | undefined
+    if (!task) throw new Error('Only failed tasks can be retried.')
+    const staged = task.staged_path && task.staged_hash && task.staged_size !== null
+      ? { managedPath: task.staged_path, sourcePath: task.file_path, filename: path.basename(task.file_path), size: task.staged_size, hash: task.staged_hash }
+      : CVVersionService.stageFile(task.file_path)
+    db.prepare("UPDATE document_tasks SET status = 'Queued', error_message = NULL, staged_path = ?, staged_hash = ?, staged_size = ? WHERE id = ?")
+      .run(staged.managedPath, staged.hash, staged.size, taskId)
+    this.notifyUI(taskId, 'Queued', task.file_path)
+    this.enqueue(task.file_path, taskId, task.provider || undefined, staged)
+  }
+
+  private enqueue(filePath: string, taskId: number, provider?: string, staged?: StagedFile) {
     this.queue.add(async () => {
       try {
-        await this.processDocument(filePath, taskId, provider)
+        await this.processDocument(filePath, taskId, provider, staged)
       } catch (err: any) {
         this.updateTaskStatus(taskId, 'Failed', filePath, err.message)
       }
     })
   }
 
-  private async processDocument(filePath: string, taskId: number, provider?: string) {
-    // 0. Size Validation
-    const fs = require('fs')
-    const stats = fs.statSync(filePath)
-    const sizeInMB = stats.size / (1024 * 1024)
-    if (sizeInMB > 20) {
-      throw new Error('File exceeds 20MB limit for processing and Notion sync.')
-    }
-
-    // 1. Extract
-    this.updateTaskStatus(taskId, 'Extracting', filePath)
-    let rawText = ''
+  private async processDocument(filePath: string, taskId: number, provider?: string, queuedStage?: StagedFile) {
+    const staged = queuedStage || CVVersionService.stageFile(filePath)
+    if (!queuedStage) db.prepare('UPDATE document_tasks SET staged_path = ?, staged_hash = ?, staged_size = ? WHERE id = ?').run(staged.managedPath, staged.hash, staged.size, taskId)
     try {
-      rawText = await FileParsingService.parseFile(filePath, (status) => {
-        this.updateTaskStatus(taskId, status, filePath)
-      })
-    } catch (parseError: any) {
-      console.warn('[Queue] Initial parser failed:', parseError.message)
-    }
+      if (queuedStage) CVVersionService.validateStaged(staged)
+      const existingCandidate = CVVersionService.findIdentical(staged.hash)
+      if (existingCandidate !== null) {
+        db.prepare('UPDATE document_tasks SET candidate_id = ?, staged_path = NULL, staged_hash = NULL, staged_size = NULL WHERE id = ?').run(existingCandidate, taskId)
+        CVVersionService.discardFile(staged.managedPath)
+        this.updateTaskStatus(taskId, 'Complete', filePath)
+        return
+      }
+      const llmSetting = db.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'llm_ocr_enabled'").get() as { setting_value?: string } | undefined
+      const alwaysSetting = db.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'llm_ocr_always'").get() as { setting_value?: string } | undefined
+      const llmOcrEnabled = llmSetting?.setting_value !== 'false'
+      const supportedFile = /\.(pdf|png|jpe?g|webp)$/i.test(filePath)
+      const alwaysSendFile = llmOcrEnabled && alwaysSetting?.setting_value === 'true' && supportedFile
 
-    let extractedData: any = null
-    const isTextTooShort = !rawText || rawText.trim().length < 100
-
-    if (isTextTooShort) {
-      const ocrProviderRow = db.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'ocr_provider'").get() as any
-      const ocrProvider = ocrProviderRow?.setting_value || 'none'
-
-      if (ocrProvider !== 'none') {
-        console.log(`[Queue] Text is too short. Falling back to LLM OCR with provider ${ocrProvider}`)
-        this.updateTaskStatus(taskId, 'LLM OCR...', filePath)
-        
-        const ocrKeyRow = db.prepare("SELECT encrypted_key, iv, auth_tag FROM api_key_store WHERE provider = 'ocr'").get() as any
-        
-        if (ocrKeyRow) {
-          const decryptedOcrKey = KeyStoreService.decrypt(ocrKeyRow.encrypted_key, ocrKeyRow.iv, ocrKeyRow.auth_tag)
-          const ocrSettings = db.prepare('SELECT model, base_url FROM api_key_store WHERE provider = ?').get(ocrProvider) as { model?: string; base_url?: string } | undefined
-          const ocrModel = ocrSettings?.model?.trim()
-          if (!ocrModel) throw new Error(`Select and save a model for ${ocrProvider} in AI Provider Settings before using OCR.`)
-          
-          try {
-            extractedData = await AIProcessingService.extractCandidateData(
-              '',
-              ocrProvider,
-              decryptedOcrKey,
-              ocrModel,
-              filePath,
-              ocrSettings?.base_url || undefined
-            )
-            rawText = `[Extracted via Multimodal LLM OCR (${ocrProvider} / ${ocrModel})]`
-          } catch (ocrErr: any) {
-            console.error('[Queue] LLM OCR Fallback failed:', ocrErr)
-            throw new Error(`Standard parsing failed and LLM OCR fallback failed: ${ocrErr.message}`)
-          }
-        } else {
-          throw new Error('Standard parsing failed. LLM OCR is enabled but API Key is not configured.')
+      this.updateTaskStatus(taskId, alwaysSendFile ? 'Analyzing document...' : 'Extracting', filePath)
+      let rawText = ''
+      let parseFailure = ''
+      if (!alwaysSendFile) {
+        try {
+          rawText = await FileParsingService.parseFile(staged.managedPath, (status) => {
+            this.updateTaskStatus(taskId, status, filePath)
+          })
+        } catch (parseError: any) {
+          parseFailure = parseError.message || String(parseError)
+          console.warn('[Queue] Initial parser failed:', parseFailure)
         }
-      } else {
-        throw new Error('Standard parsing failed (text too short or unreadable) and no LLM OCR fallback is configured.')
       }
-    }
 
-    // 2. AI Processing
-    if (!extractedData) {
-      this.updateTaskStatus(taskId, 'Analyzing', filePath)
-      const activeProvider = provider || 'openrouter' // Default fallback
-      const keyRow = db.prepare('SELECT encrypted_key, iv, auth_tag, model, base_url FROM api_key_store WHERE provider = ?').get(activeProvider) as any
-      if (!keyRow) {
-        throw new Error(`API Key for ${activeProvider} not configured. Please add it in settings.`)
+      const isTextTooShort = !rawText || rawText.trim().length < 100
+      const sendFile = alwaysSendFile || (isTextTooShort && llmOcrEnabled && supportedFile)
+      if (isTextTooShort && !sendFile) {
+        const details = parseFailure ? ` Local OCR error: ${parseFailure}` : ''
+        const suggestion = !llmOcrEnabled && supportedFile ? ' Enable LLM file processing in AI Provider Settings to analyze the document with your selected model.' : ''
+        throw new Error(`Local text extraction could not read enough text.${details}${suggestion}`)
       }
+      const savedProvider = !provider ? db.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'active_ai_provider'").get() as { setting_value?: string } | undefined : undefined
+      const activeProvider = provider || savedProvider?.setting_value || 'openrouter'
+      const keyRow = db.prepare('SELECT encrypted_key, iv, auth_tag, model, base_url FROM api_key_store WHERE provider = ?').get(activeProvider) as { encrypted_key: string; iv: string; auth_tag: string; model: string | null; base_url: string | null } | undefined
+      if (!keyRow) throw new Error(`Configure ${activeProvider} in AI Provider Settings before processing documents.`)
 
       const decryptedKey = KeyStoreService.decrypt(keyRow.encrypted_key, keyRow.iv, keyRow.auth_tag)
-      extractedData = await AIProcessingService.extractCandidateData(rawText, activeProvider, decryptedKey, keyRow.model, undefined, keyRow.base_url || undefined)
-    }
-
-    // 3. Save to Candidates Table
-    const insertCandidate = db.prepare(`
-      INSERT INTO candidates (
-        first_name, last_name, email, phone, location, job_type, headline, summary, tags, raw_text, file_path
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-
-    const insertInfo = insertCandidate.run(
-      extractedData.first_name,
-      extractedData.last_name,
-      extractedData.email,
-      extractedData.phone,
-      extractedData.location,
-      extractedData.job_type,
-      extractedData.headline,
-      extractedData.summary,
-      JSON.stringify(extractedData.tags),
-      rawText,
-      filePath
-    )
-    const newCandidateId = insertInfo.lastInsertRowid as number
-
-    // 4. Optional semantic vector indexing
-    await VectorSearchService.indexCandidate(newCandidateId)
-
-    // 5. Notion Auto-Sync
-    try {
-      if (NotionSyncService.isAutoSyncEnabled()) {
-        await NotionSyncService.syncCandidate(newCandidateId, (progressStatus) => {
-          this.updateTaskStatus(taskId, progressStatus, filePath)
-        })
+      this.updateTaskStatus(taskId, sendFile ? 'Analyzing document...' : 'Analyzing', filePath)
+      let extractedData: any
+      try {
+        extractedData = await AIProcessingService.extractCandidateData(rawText, activeProvider, decryptedKey, keyRow.model || '', sendFile ? staged.managedPath : undefined, keyRow.base_url || undefined)
+      } catch (error: any) {
+        if (sendFile) throw new Error(`Could not analyze the document with ${activeProvider}. Check that the selected model supports document or image input: ${error.message}`)
+        throw error
       }
-    } catch (err: any) {
-      console.error('[DocumentQueueService] Notion auto-sync failed:', err)
-      this.updateTaskStatus(taskId, 'Warning', filePath, `Notion Sync Failed: ${err.message}`)
-      return
-    }
+      if (sendFile && !rawText.trim()) rawText = `[Document analyzed via ${activeProvider} / ${keyRow.model || 'provider default'}]`
 
-    // 6. Mark Complete
-    this.updateTaskStatus(taskId, 'Complete', filePath)
+      const outcome = CVVersionService.ingest(staged, rawText, extractedData, taskId)
+      if (outcome.review) {
+        this.updateTaskStatus(taskId, 'Needs Review', filePath)
+        return
+      }
+      const newCandidateId = outcome.candidateId!
+      if (outcome.duplicate) {
+        this.updateTaskStatus(taskId, 'Complete', filePath)
+        return
+      }
+
+      // 4. Optional semantic vector indexing
+      const indexed = await CVVersionService.refreshIndex(newCandidateId)
+
+      // 5. Notion Auto-Sync
+      try {
+        if (NotionSyncService.isAutoSyncEnabled()) {
+          await NotionSyncService.syncCandidate(newCandidateId, (progressStatus) => {
+            this.updateTaskStatus(taskId, progressStatus, filePath)
+          })
+        }
+      } catch (err: any) {
+        console.error('[DocumentQueueService] Notion auto-sync failed:', err)
+        this.updateTaskStatus(taskId, 'Warning', filePath, `Notion Sync Failed: ${err.message}`)
+        return
+      }
+
+      // 6. Mark Complete; failed index jobs remain queued for retry.
+      if (!indexed) this.updateTaskStatus(taskId, 'Warning', filePath, 'Search indexing failed and will be retried.')
+      else this.updateTaskStatus(taskId, 'Complete', filePath)
+    } catch (error) {
+      // The staged copy remains attached to the failed task so it can be retried.
+      throw error
+    }
   }
 
   private updateTaskStatus(taskId: number, status: string, context?: string, errorMessage?: string) {

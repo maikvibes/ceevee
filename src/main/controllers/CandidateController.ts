@@ -3,9 +3,19 @@ import db, { hasCandidatesUpdatedAt } from '../db'
 import { NotionSyncService } from '../services/NotionSyncService'
 import { CandidateSearchService } from '../services/CandidateSearchService'
 import { CandidateSearchFilter } from '../services/CandidateSearchService'
-import { VectorSearchService } from '../services/VectorSearchService'
+import { CVVersionService } from '../services/CVVersionService'
 import { parse } from 'json2csv'
 import fs from 'fs'
+
+async function syncVersionChange(candidateId: number): Promise<string[]> {
+  const warnings: string[] = []
+  if (!await CVVersionService.refreshIndex(candidateId)) warnings.push('Search indexing failed and will be retried.')
+  if (NotionSyncService.isAutoSyncEnabled()) {
+    try { await NotionSyncService.syncCandidate(candidateId) }
+    catch (error: any) { warnings.push(`Notion sync failed: ${error.message}`) }
+  }
+  return warnings
+}
 
 class CandidateController {
   registerHandlers() {
@@ -99,12 +109,81 @@ class CandidateController {
 
     ipcMain.handle('get-candidate-by-filepath', async (_, filePath: string) => {
       try {
-        const candidate = db.prepare('SELECT id FROM candidates WHERE file_path = ? ORDER BY created_at DESC LIMIT 1').get(filePath) as any
+        const candidate = db.prepare(`SELECT candidate_id AS id FROM document_tasks WHERE file_path = ? AND candidate_id IS NOT NULL ORDER BY id DESC LIMIT 1`).get(filePath) || db.prepare('SELECT candidate_id AS id FROM candidate_cv_versions WHERE source_path = ? OR managed_path = ? ORDER BY id DESC LIMIT 1').get(filePath, filePath) as any
         if (!candidate) return { success: false, error: 'Candidate not found' }
         return { success: true, id: candidate.id }
       } catch (error: any) {
         return { success: false, error: error.message }
       }
+    })
+
+    ipcMain.handle('get-candidate-merge-history', async (_, candidateId: number) => {
+      try { return { success: true, data: CVVersionService.listMergeHistory(candidateId) } }
+      catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('get-duplicate-candidates', async () => {
+      try { return { success: true, data: CVVersionService.findDuplicateCandidates() } }
+      catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('merge-candidates', async (_, targetId: number, sourceId: number) => {
+      try {
+        CVVersionService.mergeCandidates(targetId, sourceId)
+        const warnings: string[] = []
+        if (!await CVVersionService.refreshIndex(sourceId)) warnings.push('Old search index cleanup will be retried.')
+        warnings.push(...await syncVersionChange(targetId))
+        return { success: true, warning: warnings.join(' ') || undefined }
+      } catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('get-cv-storage-usage', async () => {
+      try { return { success: true, totalStorage: CVVersionService.storageUsage() } }
+      catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('copy-existing-cvs', async () => {
+      try { const data = CVVersionService.copyExistingFiles(); void CVVersionService.retryIndexes(); return { success: true, data } }
+      catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('get-cv-versions', async (_, candidateId: number) => {
+      try { return { success: true, data: CVVersionService.list(candidateId), totalStorage: CVVersionService.storageUsage() } }
+      catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('read-cv-version', async (_, candidateId: number, versionId: number) => {
+      try {
+        const version = CVVersionService.getVersion(candidateId, versionId)
+        if (!version.managed_path || !fs.existsSync(version.managed_path)) throw new Error('This CV file is unavailable.')
+        const data = fs.readFileSync(version.managed_path)
+        return { success: true, data: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength), filename: version.original_filename, rawText: version.raw_text || '' }
+      } catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('reset-profile-to-current-cv', async (_, candidateId: number) => {
+      try {
+        CVVersionService.resetProfileToCurrentCv(candidateId)
+        const warnings = await syncVersionChange(candidateId)
+        return { success: true, warning: warnings.join(' ') || undefined }
+      } catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('set-current-cv-version', async (_, candidateId: number, versionId: number) => {
+      try {
+        CVVersionService.setCurrent(candidateId, versionId)
+        const warnings = await syncVersionChange(candidateId)
+        return { success: true, warning: warnings.join(' ') || undefined }
+      } catch (error: any) { return { success: false, error: error.message } }
+    })
+
+    ipcMain.handle('delete-cv-version', async (_, candidateId: number, versionId: number) => {
+      try {
+        const result = CVVersionService.deleteVersion(candidateId, versionId)
+        const warnings = await syncVersionChange(candidateId)
+        if (!result.fileRemoved) warnings.push('The managed file could not be deleted. Cleanup will be retried.')
+        return { success: true, warning: warnings.join(' ') || undefined }
+      } catch (error: any) { return { success: false, error: error.message } }
     })
 
     ipcMain.handle('export-candidates-csv', async (_, params: { search?: string, status?: string, tag?: string }) => {
@@ -192,8 +271,18 @@ class CandidateController {
         const updatedTimeClause = hasCandidatesUpdatedAt ? ', updated_at = CURRENT_TIMESTAMP' : ''
         const query = `UPDATE candidates SET ${setClauses.join(', ')}${updatedTimeClause} WHERE id = ?`
         values.push(id)
-        db.prepare(query).run(...values)
-        return { success: true }
+        db.transaction(() => {
+          db.prepare(query).run(...values)
+          const row = db.prepare('SELECT manual_fields FROM candidates WHERE id = ?').get(id) as { manual_fields: string } | undefined
+          if (!row) throw new Error('Candidate not found')
+          let fields: string[] = []
+          try { fields = JSON.parse(row.manual_fields || '[]') } catch { fields = [] }
+          for (const key of Object.keys(updates)) if (allowedFields.includes(key) && key !== 'status' && !fields.includes(key)) fields.push(key)
+          db.prepare('UPDATE candidates SET manual_fields = ? WHERE id = ?').run(JSON.stringify(fields), id)
+          CVVersionService.markForReindex(id)
+        })()
+        const indexed = await CVVersionService.refreshIndex(id)
+        return { success: true, warning: indexed ? undefined : 'Search indexing failed and will be retried.' }
       } catch (error: any) {
         console.error('[CandidateController] Error updating candidate:', error)
         return { success: false, error: error.message }
@@ -202,14 +291,9 @@ class CandidateController {
 
     ipcMain.handle('delete-candidate', async (_, id: number) => {
       try {
-        try {
-          await VectorSearchService.deleteCandidate(id)
-        } catch (error) {
-          console.warn('[CandidateController] Failed to delete candidate vectors:', error)
-        }
-        db.prepare('DELETE FROM notion_sync_history WHERE candidate_id = ?').run(id)
-        db.prepare('DELETE FROM candidates WHERE id = ?').run(id)
-        return { success: true }
+        const removed = CVVersionService.deleteCandidate(id)
+        const indexed = await CVVersionService.refreshIndex(id)
+        return { success: true, warning: [removed ? '' : 'Some managed files could not be deleted; cleanup will be retried.', indexed ? '' : 'Search index cleanup failed and will be retried.'].filter(Boolean).join(' ') || undefined }
       } catch (error: any) {
         console.error('[CandidateController] Error deleting candidate:', error)
         return { success: false, error: error.message }
@@ -328,85 +412,11 @@ class CandidateController {
       }
     })
 
-    ipcMain.handle('delete-duplicate-candidates', async () => {
-      try {
-        let deletedCount = 0
-        db.transaction(() => {
-          // 1. Duplicates by Email
-          const duplicateEmails = db.prepare(`
-            SELECT email, id FROM candidates 
-            WHERE email IS NOT NULL AND email != ''
-            AND email IN (SELECT email FROM candidates WHERE email IS NOT NULL AND email != '' GROUP BY email HAVING COUNT(*) > 1)
-            ORDER BY email, id DESC
-          `).all() as { email: string, id: number }[]
+    ipcMain.handle('delete-duplicate-candidates', async () => ({
+      success: false,
+      error: 'Automatic duplicate deletion is disabled to protect CV history. Review potential matches in the processing queue.'
+    }))
 
-          const emailsKeep = new Set<string>()
-          for (const row of duplicateEmails) {
-            if (!emailsKeep.has(row.email)) {
-              emailsKeep.add(row.email)
-            } else {
-              try {
-                VectorSearchService.deleteCandidate(row.id)
-              } catch (e) {}
-              db.prepare('DELETE FROM notion_sync_history WHERE candidate_id = ?').run(row.id)
-              db.prepare('DELETE FROM candidates WHERE id = ?').run(row.id)
-              deletedCount++
-            }
-          }
-
-          // 2. Duplicates by Phone
-          const duplicatePhones = db.prepare(`
-            SELECT phone, id FROM candidates 
-            WHERE phone IS NOT NULL AND phone != ''
-            AND phone IN (SELECT phone FROM candidates WHERE phone IS NOT NULL AND phone != '' GROUP BY phone HAVING COUNT(*) > 1)
-            ORDER BY phone, id DESC
-          `).all() as { phone: string, id: number }[]
-
-          const phonesKeep = new Set<string>()
-          for (const row of duplicatePhones) {
-            if (!phonesKeep.has(row.phone)) {
-              phonesKeep.add(row.phone)
-            } else {
-              try {
-                VectorSearchService.deleteCandidate(row.id)
-              } catch (e) {}
-              db.prepare('DELETE FROM notion_sync_history WHERE candidate_id = ?').run(row.id)
-              db.prepare('DELETE FROM candidates WHERE id = ?').run(row.id)
-              deletedCount++
-            }
-          }
-
-          // 3. Duplicates by Name (First Name + Last Name)
-          const duplicateNames = db.prepare(`
-            SELECT first_name, last_name, id FROM candidates 
-            WHERE (first_name || ' ' || last_name) IN (
-              SELECT (first_name || ' ' || last_name) FROM candidates GROUP BY first_name, last_name HAVING COUNT(*) > 1
-            )
-            ORDER BY first_name, last_name, id DESC
-          `).all() as { first_name: string, last_name: string, id: number }[]
-
-          const namesKeep = new Set<string>()
-          for (const row of duplicateNames) {
-            const key = `${row.first_name}_${row.last_name}`
-            if (!namesKeep.has(key)) {
-              namesKeep.add(key)
-            } else {
-              try {
-                VectorSearchService.deleteCandidate(row.id)
-              } catch (e) {}
-              db.prepare('DELETE FROM notion_sync_history WHERE candidate_id = ?').run(row.id)
-              db.prepare('DELETE FROM candidates WHERE id = ?').run(row.id)
-              deletedCount++
-            }
-          }
-        })()
-
-        return { success: true, deletedCount }
-      } catch (error: any) {
-        console.error('[CandidateController] Error deleting duplicate candidates:', error)
-        return { success: false, error: error.message }
-      }
-    })
   }
 }
 

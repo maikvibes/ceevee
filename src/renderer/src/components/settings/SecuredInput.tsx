@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Eye, EyeOff, Lock, Unlock } from 'lucide-react'
@@ -9,31 +9,35 @@ interface SecuredInputProps {
   provider: string
   value: string
   onChange: (val: string) => void
+  onUserChange?: (value: string) => void
+  onUnlocked?: () => void
   placeholder?: string
   className?: string
 }
 
-export function SecuredInput({ provider, value, onChange, placeholder, className }: SecuredInputProps) {
+export function SecuredInput({ provider, value, onChange, onUserChange, onUnlocked, placeholder, className }: SecuredInputProps) {
   const [showPassword, setShowPassword] = useState(false)
   const [isLocked, setIsLocked] = useState(true)
   const [showPasswordDialog, setShowPasswordDialog] = useState(false)
-  const [isLoaded, setIsLoaded] = useState(false)
+  const requestId = useRef(0)
 
   useEffect(() => {
-    checkLockStatus()
-  }, [])
-
-  useEffect(() => {
-    // When provider changes, reset loaded state
-    setIsLoaded(false)
-    onChange('') // Clear value on provider switch
-    checkLockStatus()
+    const id = ++requestId.current
+    onChange('')
+    setShowPassword(false)
+    void (async () => {
+      const locked = await window.api.isKeystoreLocked()
+      if (id !== requestId.current) return
+      setIsLocked(locked)
+      if (!locked) await loadKey(id)
+    })()
+    return () => { requestId.current++ }
   }, [provider])
 
   useEffect(() => {
     const handleReset = () => {
+      requestId.current++
       setIsLocked(true)
-      setIsLoaded(false)
       onChange('')
       setShowPassword(false)
     }
@@ -41,22 +45,11 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
     return () => window.removeEventListener('keystore-reset', handleReset)
   }, [onChange])
 
-  const checkLockStatus = async () => {
-    const locked = await window.api.isKeystoreLocked()
-    setIsLocked(locked)
-    if (!locked && !isLoaded) {
-      loadKey()
-    }
-  }
-
-  const loadKey = async () => {
+  const loadKey = async (id = requestId.current) => {
     if (!window.api.getApiKey) return
     try {
       const res = await window.api.getApiKey(provider)
-      if (res && res.success && res.data) {
-        onChange(res.data)
-        setIsLoaded(true)
-      }
+      if (id === requestId.current && res?.success) onChange(res.data || '')
     } catch (e) {
       console.error("Failed to load key:", e)
     }
@@ -69,6 +62,7 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
     } else {
       setIsLocked(false)
       loadKey()
+      onUnlocked?.()
     }
   }
 
@@ -76,6 +70,7 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
     setShowPasswordDialog(false)
     setIsLocked(false)
     loadKey()
+    onUnlocked?.()
   }
 
   const executeLock = async () => {
@@ -87,7 +82,7 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
       const res = await window.api.lockKeystore()
       if (res.success) {
         setIsLocked(true)
-        setIsLoaded(false)
+        requestId.current++
         onChange('')
         setShowPassword(false)
       } else {
@@ -103,9 +98,13 @@ export function SecuredInput({ provider, value, onChange, placeholder, className
       <div className="relative w-full">
         <Input
           type={isLocked || !showPassword ? "password" : "text"}
-          value={isLocked ? "••••••••••••••••" : value}
+          value={isLocked ? "Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢Ã¢â‚¬Â¢" : value}
           onChange={(e) => {
-            if (!isLocked) onChange(e.target.value)
+            if (!isLocked) {
+              requestId.current++
+              onChange(e.target.value)
+              onUserChange?.(e.target.value)
+            }
           }}
           disabled={isLocked}
           placeholder={placeholder}

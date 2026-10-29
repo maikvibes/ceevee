@@ -19,6 +19,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { useNavigate } from 'react-router-dom';
+import { toast } from 'sonner';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 
 const getProgressPercentage = (status: string) => {
   if (status.startsWith("OCR:")) {
@@ -34,6 +36,7 @@ const getProgressPercentage = (status: string) => {
     case "Attaching CV to Notion Page": return 95;
     case "Complete": return 100;
     case "Failed": return 100;
+    case "Needs Review": return 100;
     default: return 0;
   }
 };
@@ -50,6 +53,7 @@ const getHumanReadableStatus = (status: string) => {
     case "Complete": return "Done";
     case "Failed": return "Error processing";
     case "Warning": return "Done with warnings";
+    case "Needs Review": return "Possible existing candidate";
     default: return status;
   }
 };
@@ -57,14 +61,43 @@ const getHumanReadableStatus = (status: string) => {
 const getStatusIcon = (status: string) => {
   if (status === "Complete") return <CheckCircle className="size-5 text-success" />;
   if (status === "Failed") return <XCircle className="size-5 text-destructive" />;
+  if (status === "Needs Review") return <AlertTriangle className="size-5 text-warning" />;
   if (status === "Warning") return <AlertTriangle className="size-5 text-warning" />;
   if (status === "Queued") return <ListTodo className="size-5 text-muted-foreground" />;
   return <Loader2 className="size-5 text-info animate-spin" />;
 };
 
 export function TaskQueueDrawer() {
-  const { isDrawerOpen, setIsDrawerOpen, isDraggingOver, tasks, enqueueFiles, removeTask, clearQueue } = useTaskQueue();
+  const { isDrawerOpen, setIsDrawerOpen, isDraggingOver, tasks, enqueueFiles, removeTask, clearQueue, loadTasks } = useTaskQueue();
   const [isMinimized, setIsMinimized] = useState(false);
+  const [review, setReview] = useState<{ taskId: number; filename: string; incoming: { first_name?: string; last_name?: string; email?: string; phone?: string }; candidates: Array<{ id: number; first_name: string; last_name: string; email: string; phone: string }> } | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false);
+
+  const retryTask = async (taskId: number) => {
+    const result = await window.api.retryDocumentTask(taskId);
+    if (!result.success) toast.error(result.error || 'Could not retry this document.');
+    else await loadTasks();
+  };
+
+  const openReview = async (taskId: number) => {
+    const result = await window.api.getCvMatchReview(taskId);
+    if (result.success && result.data) setReview({ ...result.data, taskId });
+    else toast.error(result.error || 'Could not load the match review.');
+  };
+
+  const resolveReview = async (candidateId: number | null) => {
+    if (!review) return;
+    setReviewBusy(true);
+    try {
+      const result = await window.api.resolveCvMatchReview(review.taskId, candidateId);
+      if (!result.success) throw new Error(result.error || 'Could not resolve the match.');
+      setReview(null);
+      await loadTasks();
+      if (result.warning) toast.warning(result.warning);
+      toast.success(candidateId ? 'CV added to candidate history.' : 'Created a separate candidate.');
+    } catch (error) { toast.error(error instanceof Error ? error.message : String(error)); }
+    finally { setReviewBusy(false); }
+  };
   const navigate = useNavigate();
 
   const handleManualAddFiles = async () => {
@@ -77,7 +110,7 @@ export function TaskQueueDrawer() {
 
   const successCount = tasks.filter((t) => t.status === 'Complete').length;
   const errorCount = tasks.filter((t) => t.status === 'Failed').length;
-  const warningCount = tasks.filter((t) => t.status === 'Warning').length;
+  const warningCount = tasks.filter((t) => t.status === 'Warning' || t.status === 'Needs Review').length;
   const inProgressCount = tasks.length - successCount - errorCount - warningCount;
 
   const isOpen = isDrawerOpen || isDraggingOver;
@@ -225,13 +258,13 @@ export function TaskQueueDrawer() {
                             >
                               {task.status}
                             </Badge>
-                            <button
+                            {["Complete", "Failed", "Warning"].includes(task.status) && <button
                               onClick={(e) => { e.stopPropagation(); removeTask(task.id); }}
                               className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-muted text-muted-foreground hover:text-destructive rounded-md"
                               title="Remove Task"
                             >
                               <X className="size-4" />
-                            </button>
+                            </button>}
                           </div>
                         </div>
     
@@ -242,6 +275,8 @@ export function TaskQueueDrawer() {
                           />
                         </div>
     
+                        {task.status === "Failed" && <div><Button variant="outline" size="sm" onClick={() => void retryTask(task.id)}>Retry</Button></div>}
+                        {task.status === "Needs Review" && <div><Button variant="outline" size="sm" onClick={() => void openReview(task.id)}>Review match</Button></div>}
                         {task.error_message && (
                           <p className={`text-xs p-1.5 rounded border ${isWarning ? "text-warning bg-warning/10 border-warning/20" : "text-destructive bg-destructive/10 border-destructive/20"}`}>
                             {task.error_message}
@@ -256,6 +291,16 @@ export function TaskQueueDrawer() {
           </div>
         </div>
       </div>
+      <Dialog open={!!review} onOpenChange={(open) => { if (!open && !reviewBusy) setReview(null); }}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Review possible match</DialogTitle><DialogDescription>Choose an existing candidate to add this CV as a new version, or keep it separate.</DialogDescription></DialogHeader>
+          {review && <div className="space-y-4">
+            <div className="rounded-md border p-3 text-sm"><p className="font-medium">{review.filename}</p><p className="text-muted-foreground">{review.incoming.first_name} {review.incoming.last_name} ? {review.incoming.email || 'No email'} ? {review.incoming.phone || 'No phone'}</p></div>
+            <div className="space-y-2">{review.candidates.map((candidate) => <div key={candidate.id} className="flex items-center justify-between gap-3 rounded-md border p-3"><div className="text-sm"><p className="font-medium">{candidate.first_name} {candidate.last_name}</p><p className="text-muted-foreground">{candidate.email || 'No email'} ? {candidate.phone || 'No phone'}</p></div><Button variant="outline" size="sm" disabled={reviewBusy} onClick={() => void resolveReview(candidate.id)}>Add version</Button></div>)}</div>
+            <Button variant="secondary" disabled={reviewBusy} onClick={() => void resolveReview(null)}>Create separate candidate</Button>
+          </div>}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

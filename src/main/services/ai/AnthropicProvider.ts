@@ -3,10 +3,11 @@ import * as fs from 'fs'
 
 export class AnthropicProvider implements IAIProvider {
   async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string, baseUrl?: string): Promise<string> {
-    if (!apiKey) throw new Error('Anthropic API key is missing.')
+    const normalizedKey = apiKey.trim().replace(/^Bearer\s+/i, '')
+    if (!normalizedKey && !baseUrl) throw new Error('Anthropic API key is missing.')
 
     const headers: Record<string, string> = {
-      'x-api-key': apiKey.trim().replace(/^Bearer\s+/i, ''),
+      ...(normalizedKey ? { 'x-api-key': normalizedKey } : {}),
       'anthropic-version': '2023-06-01',
       'content-type': 'application/json',
     }
@@ -47,7 +48,11 @@ export class AnthropicProvider implements IAIProvider {
             text: prompt
           }
         ]
+      } else {
+        throw new Error('Anthropic document analysis supports PDF and image files only.')
       }
+    } else if (filePath) {
+      throw new Error('Document file could not be found.')
     }
 
     const response = await fetch(`${(baseUrl || 'https://api.anthropic.com/v1').replace(/\/+$/, '')}/messages`, {

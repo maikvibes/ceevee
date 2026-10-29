@@ -1,8 +1,25 @@
 import { IAIProvider } from './IAIProvider'
+import * as fs from 'fs'
+import * as path from 'path'
 
 export class OpenRouterProvider implements IAIProvider {
-  async generateCompletion(prompt: string, apiKey: string, model: string, _filePath?: string): Promise<string> {
+  async generateCompletion(prompt: string, apiKey: string, model: string, filePath?: string): Promise<string> {
     if (!apiKey) throw new Error('OpenRouter API key is missing.')
+
+    let content: any = prompt
+    if (filePath) {
+      if (!fs.existsSync(filePath)) throw new Error('Document file could not be found.')
+      const ext = path.extname(filePath).toLowerCase()
+      const data = fs.readFileSync(filePath).toString('base64')
+      if (ext === '.pdf') {
+        content = [{ type: 'text', text: prompt }, { type: 'file', file: { filename: path.basename(filePath), fileData: `data:application/pdf;base64,${data}` } }]
+      } else if (['.png', '.jpg', '.jpeg', '.webp'].includes(ext)) {
+        const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg'
+        content = [{ type: 'text', text: prompt }, { type: 'image_url', imageUrl: { url: `data:${mime};base64,${data}` } }]
+      } else {
+        throw new Error('OpenRouter document analysis supports PDF and image files only.')
+      }
+    }
 
     try {
       const { OpenRouter } = await import('@openrouter/sdk')
@@ -17,7 +34,7 @@ export class OpenRouterProvider implements IAIProvider {
         chatRequest: {
           model: model || 'openai/gpt-4o-mini',
           messages: [
-            { role: 'user', content: prompt }
+            { role: 'user', content }
           ],
           temperature: 0.1
         }

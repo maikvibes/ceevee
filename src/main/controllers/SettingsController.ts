@@ -5,7 +5,8 @@ import db from '../db'
 import { KeyStoreService } from '../services/KeyStoreService'
 import { documentQueue } from '../services/DocumentQueueService'
 import { VectorSearchService, VectorSearchSettings } from '../services/VectorSearchService'
-import { EmbeddingProviderName } from '../services/EmbeddingProvider'
+import { openAIClientOptions } from '../services/ai/providerOptions'
+import { CVVersionService } from '../services/CVVersionService'
 
 class SettingsController {
   registerHandlers() {
@@ -60,6 +61,7 @@ class SettingsController {
           }
         }
 
+        void CVVersionService.retryIndexes()
         return { success: true }
       } catch (error: any) {
         return { success: false, error: error.message }
@@ -87,16 +89,11 @@ class SettingsController {
 
     ipcMain.handle('delete-all-data', async () => {
       try {
+        if (documentQueue.isProcessing()) throw new Error('Wait for active document processing to finish before deleting all data.')
         documentQueue.clearQueue()
-        // Artificial delay for UX so the loading animation is visible to the user
-        await new Promise(resolve => setTimeout(resolve, 800))
-        
-        db.transaction(() => {
-          db.prepare('DELETE FROM notion_sync_history').run()
-          db.prepare('DELETE FROM document_tasks').run()
-          db.prepare('DELETE FROM candidates').run()
-          db.prepare('DELETE FROM job_search_history').run()
-        })()
+        const removed = CVVersionService.deleteAllData()
+        await CVVersionService.retryIndexes()
+        if (!removed) return { success: true, warning: 'Some managed files could not be deleted; cleanup will be retried.' }
         return { success: true }
       } catch (error: any) {
         return { success: false, error: error.message }
@@ -152,6 +149,35 @@ class SettingsController {
       }
     })
 
+    ipcMain.handle('save-provider-config', async (_, params: { provider: string; key?: string; model?: string; baseUrl?: string }) => {
+      try {
+        if (!['openai', 'gemini', 'anthropic', 'openrouter'].includes(params.provider)) throw new Error('Unsupported provider.')
+        const baseUrl = params.baseUrl?.trim()
+        if (baseUrl) {
+          const url = new URL(baseUrl)
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+            throw new Error('Base URL must be an HTTP(S) URL without credentials, query, or fragment.')
+          }
+        }
+        const previous = db.prepare('SELECT encrypted_key, iv, auth_tag, model, base_url FROM api_key_store WHERE provider = ?').get(params.provider) as { encrypted_key: string; iv: string; auth_tag: string; model: string | null; base_url: string | null } | undefined
+        if ((params.key !== undefined || !previous) && KeyStoreService.isLocked()) throw new Error('Unlock the keystore to save provider settings.')
+        const encrypted = params.key !== undefined || !previous
+          ? KeyStoreService.encrypt((params.key || '').trim().replace(/^Bearer\s+/i, ''))
+          : { encryptedKey: previous.encrypted_key, iv: previous.iv, authTag: previous.auth_tag }
+        db.transaction(() => {
+          db.prepare(`INSERT INTO api_key_store (provider, encrypted_key, iv, auth_tag, model, base_url, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(provider) DO UPDATE SET encrypted_key = excluded.encrypted_key, iv = excluded.iv,
+              auth_tag = excluded.auth_tag, model = excluded.model, base_url = excluded.base_url, updated_at = CURRENT_TIMESTAMP`)
+            .run(params.provider, encrypted.encryptedKey, encrypted.iv, encrypted.authTag, params.model ?? previous?.model ?? '', baseUrl ?? previous?.base_url ?? '')
+          if (baseUrl !== undefined && baseUrl !== (previous?.base_url || '')) db.prepare('DELETE FROM ai_models WHERE provider = ?').run(params.provider)
+        })()
+        return { success: true }
+      } catch (error: any) {
+        return { success: false, error: error.message }
+      }
+    })
+
     ipcMain.handle('get-saved-provider-settings', async (_, provider: string) => {
       try {
         const row = db.prepare('SELECT model, base_url FROM api_key_store WHERE provider = ?').get(provider) as any
@@ -198,7 +224,7 @@ class SettingsController {
           let afterId: string | undefined
           do {
             if (afterId) url.searchParams.set('after_id', afterId)
-            const response = await fetch(url, { headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' } })
+            const response = await fetch(url, { headers: { ...(apiKey ? { 'x-api-key': apiKey } : {}), 'anthropic-version': '2023-06-01' } })
             if (!response.ok) throw new Error(`Anthropic model list failed (${response.status}).`)
             const page = await response.json() as { data: Array<{ id: string; display_name?: string }>; has_more?: boolean; last_id?: string }
             models.push(...page.data)
@@ -206,7 +232,10 @@ class SettingsController {
             afterId = page.has_more ? page.last_id : undefined
           } while (afterId)
           const insert = db.prepare('INSERT INTO ai_models (provider, model_id, name) VALUES (?, ?, ?) ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name')
-          db.transaction(() => { for (const model of models) insert.run(provider, model.id, model.display_name || model.id) })()
+          db.transaction(() => {
+            db.prepare('DELETE FROM ai_models WHERE provider = ?').run(provider)
+            for (const model of models) insert.run(provider, model.id, model.display_name || model.id)
+          })()
           return { success: true }
         }
 
@@ -225,6 +254,7 @@ class SettingsController {
           
           const insert = db.prepare('INSERT OR IGNORE INTO ai_models (provider, model_id, name) VALUES (?, ?, ?)')
           db.transaction(() => {
+            db.prepare('DELETE FROM ai_models WHERE provider = ?').run(provider)
             for (const m of data.data || []) {
               insert.run(provider, m.id, m.name || m.id)
             }
@@ -243,7 +273,7 @@ class SettingsController {
           }
 
           const apiKey = KeyStoreService.decrypt(row.encrypted_key, row.iv, row.auth_tag)
-          const client = new OpenAI({ apiKey, baseURL: row.base_url || undefined })
+          const client = new OpenAI(openAIClientOptions(apiKey, row.base_url || undefined))
           const models: Array<{ id: string }> = []
           for await (const model of client.models.list()) {
             models.push(model)
@@ -255,6 +285,7 @@ class SettingsController {
             ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name
           `)
           db.transaction(() => {
+            db.prepare('DELETE FROM ai_models WHERE provider = ?').run(provider)
             for (const model of models) {
               insert.run(provider, model.id, model.id)
             }
@@ -288,6 +319,7 @@ class SettingsController {
             ON CONFLICT(provider, model_id) DO UPDATE SET name = excluded.name
           `)
           db.transaction(() => {
+            db.prepare('DELETE FROM ai_models WHERE provider = ?').run(provider)
             for (const model of models) {
               insert.run(provider, model.name, model.displayName || model.name)
             }
@@ -333,18 +365,10 @@ class SettingsController {
       }
     })
 
-    ipcMain.handle('test-vector-db-connection', async (_, config: unknown) => {
-      try {
-        const data = await VectorSearchService.testConnection(config as Partial<VectorSearchSettings>)
-        return { success: true, data }
-      } catch (error: unknown) {
-        return { success: false, error: getErrorMessage(error) }
-      }
-    })
-
     ipcMain.handle('save-vector-search-settings', async (_, settings: Partial<VectorSearchSettings>) => {
       try {
         const data = VectorSearchService.saveSettings(settings)
+        if (data.vector_search_enabled) void CVVersionService.retryIndexes()
         return { success: true, data }
       } catch (error: unknown) {
         return { success: false, error: getErrorMessage(error) }
@@ -360,14 +384,6 @@ class SettingsController {
       }
     })
 
-    ipcMain.handle('get-embedding-models', async (_, provider: EmbeddingProviderName) => {
-      try {
-        const data = await VectorSearchService.getEmbeddingModels(provider)
-        return { success: true, data }
-      } catch (error: unknown) {
-        return { success: false, error: getErrorMessage(error) }
-      }
-    })
   }
 }
 

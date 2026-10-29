@@ -65,7 +65,8 @@ export function TaskQueueProvider({ children }: { children: React.ReactNode }) {
   const removeTask = async (taskId: number) => {
     const res = await window.api.removeDocumentTask(taskId);
     if (res.success) {
-      toast.success('Task removed from queue.');
+      if (res.warning) toast.warning(res.warning);
+      else toast.success('Task removed from queue.');
       loadTasks();
     } else {
       toast.error(res.error || 'Failed to remove task.');
@@ -75,7 +76,8 @@ export function TaskQueueProvider({ children }: { children: React.ReactNode }) {
   const clearQueue = async () => {
     const res = await window.api.clearDocumentQueue();
     if (res.success) {
-      toast.success('Queue cleared.');
+      if (res.warning) toast.warning(res.warning);
+      else toast.success(res.remainingReviews ? `Queue cleared; ${res.remainingReviews} match review(s) remain.` : 'Queue cleared.');
       loadTasks();
     } else {
       toast.error(res.error || 'Failed to clear queue.');

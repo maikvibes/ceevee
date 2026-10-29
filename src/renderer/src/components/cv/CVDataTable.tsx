@@ -1,3 +1,4 @@
+import { toast } from 'sonner';
 import { useEffect, useRef, useState, useMemo } from "react";
 import {
   useReactTable,
@@ -198,7 +199,8 @@ export function CVDataTable({
     if (res.success) {
       setCandidates((prev) => prev.filter((c) => c.id !== id));
       setTotal((t) => t - 1);
-    }
+      if (res.warning) toast.warning(res.warning);
+    } else toast.error(res.error || 'Could not delete candidate.');
     setCandidateToDelete(null);
   };
 
@@ -565,8 +567,7 @@ export function CVDataTable({
                 Are you sure you want to delete this candidate?
               </AlertDialogTitle>
               <AlertDialogDescription>
-                This action cannot be undone. This will permanently delete the
-                candidate's data and remove them from our servers.
+                This permanently deletes the candidate profile and CeeVee's managed CV copies. Original files and copies previously synced to Notion are not deleted.
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
